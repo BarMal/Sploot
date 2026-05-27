@@ -4,6 +4,7 @@ import androidx.compose.runtime.Composable
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import com.sploot.app.ui.debug.DebugScreen
 import com.sploot.app.ui.screen.DashboardScreen
 import com.sploot.app.ui.screen.GarminImportScreen
 import com.sploot.app.ui.screen.SettingsScreen
@@ -14,6 +15,7 @@ object Routes {
     const val SLEEP_DETAIL  = "sleep/{sessionId}"
     const val GARMIN_IMPORT = "garmin_import"
     const val SETTINGS      = "settings"
+    const val DEBUG         = "debug"
 }
 
 @Composable
@@ -27,5 +29,6 @@ fun SplootNavHost() {
         }
         composable(Routes.GARMIN_IMPORT) { GarminImportScreen(nav) }
         composable(Routes.SETTINGS)      { SettingsScreen(nav) }
+        composable(Routes.DEBUG)         { DebugScreen(nav) }
     }
 }
