@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Sploot</string>
+    <string name="notif_channel_recording">Whoop Recording</string>
+    <string name="notif_recording_title">Whoop recording active</string>
+    <string name="notif_recording_text">Collecting raw BLE data…</string>
+</resources>

@@ -1,0 +1,19 @@
+package com.sploot.data.dao
+
+import androidx.room.Dao
+import androidx.room.Insert
+import androidx.room.OnConflictStrategy
+import androidx.room.Query
+import com.sploot.data.entity.HrSampleEntity
+
+@Dao
+interface HrSampleDao {
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insert(sample: HrSampleEntity)
+
+    @Query("SELECT * FROM hr_samples WHERE sessionId = :sessionId ORDER BY tsSeconds ASC")
+    suspend fun getBySession(sessionId: Long): List<HrSampleEntity>
+
+    @Query("SELECT AVG(hrBpm) FROM hr_samples WHERE sessionId = :sessionId AND tsSeconds BETWEEN :from AND :to")
+    suspend fun averageHrInWindow(sessionId: Long, from: Long, to: Long): Float?
+}
