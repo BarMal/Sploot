@@ -10,13 +10,14 @@ data class SleepSession(
     val startEpochSeconds: Long,
     val endEpochSeconds: Long,
     val source: SleepSource,
-    /** Composite sleep quality score 0–100, or null before scoring. */
+    val algorithmRevisionId: Long?,
+    /** Composite sleep quality score 0-100, or null before scoring. */
     val totalScore: Int?,
     val deepMinutes: Int,
     val lightMinutes: Int,
     val remMinutes: Int,
     val awakeMinutes: Int,
     val latencyMinutes: Int,
-    /** Sleep efficiency = (total_sleep / time_in_bed) × 100 */
+    /** Sleep efficiency = (total_sleep / time_in_bed) x 100 */
     val efficiencyPercent: Float?,
 )

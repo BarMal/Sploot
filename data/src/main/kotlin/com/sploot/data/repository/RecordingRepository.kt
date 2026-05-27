@@ -18,69 +18,125 @@ import javax.inject.Singleton
 /**
  * Persists raw Whoop sensor data during a recording session.
  *
- * This repository takes primitive/ByteArray parameters deliberately —
- * it does NOT import WhoopRecord to avoid creating a :data→:whoop-ble
- * module dependency.  Serialisation happens in the calling layer
- * (WhoopRecordingService in :app).
+ * This repository keeps the API primitive so the data module does not depend
+ * directly on the BLE decoding module.
  */
 @Singleton
 class RecordingRepository @Inject constructor(
     private val sessionDao: RecordingSessionDao,
-    private val imuDao:     RawImuDao,
-    private val ppgDao:     RawPpgDao,
-    private val hrDao:      HrSampleDao,
-    private val eventDao:   WhoopEventDao,
+    private val imuDao: RawImuDao,
+    private val ppgDao: RawPpgDao,
+    private val hrDao: HrSampleDao,
+    private val eventDao: WhoopEventDao,
 ) {
 
-    // ── Session lifecycle ─────────────────────────────────────────────────────
+    // Session lifecycle
 
-    suspend fun startSession(): Long = sessionDao.insert(
-        RecordingSessionEntity(
-            startTimestampSeconds = Instant.now().epochSecond,
-            endTimestampSeconds   = null,
+    suspend fun startSession(): Long =
+        sessionDao.insert(
+            RecordingSessionEntity(
+                startTimestampSeconds = Instant.now().epochSecond,
+                endTimestampSeconds = null,
+            )
         )
-    )
 
-    suspend fun endSession(sessionId: Long) =
+    suspend fun endSession(sessionId: Long) {
         sessionDao.close(sessionId, Instant.now().epochSecond)
+    }
 
     fun sessionsFlow(): Flow<List<RecordingSessionEntity>> = sessionDao.getAllFlow()
 
-    // ── Raw IMU ───────────────────────────────────────────────────────────────
+    // Raw IMU
 
     /**
-     * @param accelX/Y/Z  100 × int16 LE = 200 bytes per channel
-     * @param gyroX/Y/Z   100 × int16 LE = 200 bytes per channel
+     * Each accelerometer and gyroscope channel contains 100 int16 LE samples.
      */
     suspend fun insertImu(
-        sessionId: Long, tsSeconds: Long, hrBpm: Int,
-        accelX: ByteArray, accelY: ByteArray, accelZ: ByteArray,
-        gyroX:  ByteArray, gyroY:  ByteArray, gyroZ:  ByteArray,
+        sessionId: Long,
+        tsSeconds: Long,
+        hrBpm: Int,
+        accelX: ByteArray,
+        accelY: ByteArray,
+        accelZ: ByteArray,
+        gyroX: ByteArray,
+        gyroY: ByteArray,
+        gyroZ: ByteArray,
     ) {
         imuDao.insert(
-            RawImuEntity(sessionId, tsSeconds, hrBpm, accelX, accelY, accelZ, gyroX, gyroY, gyroZ)
+            RawImuEntity(
+                sessionId,
+                tsSeconds,
+                hrBpm,
+                accelX,
+                accelY,
+                accelZ,
+                gyroX,
+                gyroY,
+                gyroZ,
+            )
         )
         hrDao.insert(HrSampleEntity(sessionId, tsSeconds, hrBpm))
     }
 
-    // ── Raw PPG ───────────────────────────────────────────────────────────────
+    // Raw PPG
 
-    /** @param channelA..F  100 × uint16 LE = 200 bytes per channel */
+    /**
+     * Each optical channel contains 100 uint16 LE samples.
+     */
     suspend fun insertPpg(
-        sessionId: Long, tsSeconds: Long, ledDrive: Int,
-        channelA: ByteArray, channelB: ByteArray, channelC: ByteArray,
-        channelD: ByteArray, channelE: ByteArray, channelF: ByteArray,
-    ) = ppgDao.insert(
-        RawPpgEntity(sessionId, tsSeconds, ledDrive, channelA, channelB, channelC, channelD, channelE, channelF)
-    )
+        sessionId: Long,
+        tsSeconds: Long,
+        ledDrive: Int,
+        channelA: ByteArray,
+        channelB: ByteArray,
+        channelC: ByteArray,
+        channelD: ByteArray,
+        channelE: ByteArray,
+        channelF: ByteArray,
+    ) {
+        ppgDao.insert(
+            RawPpgEntity(
+                sessionId,
+                tsSeconds,
+                ledDrive,
+                channelA,
+                channelB,
+                channelC,
+                channelD,
+                channelE,
+                channelF,
+            )
+        )
+    }
 
-    // ── Events ────────────────────────────────────────────────────────────────
+    // Events
 
-    /** @param eventType  "BATTERY" | "TEMP" | "WRIST_ON" | "WRIST_OFF" */
-    suspend fun insertEvent(sessionId: Long, tsSeconds: Long, eventType: String, value: Float?) =
-        eventDao.insert(WhoopEventEntity(sessionId = sessionId, tsSeconds = tsSeconds, eventType = eventType, valueFloat = value))
+    /** @param eventType "BATTERY" | "TEMP" | "WRIST_ON" | "WRIST_OFF" */
+    suspend fun insertEvent(
+        sessionId: Long,
+        tsSeconds: Long,
+        eventType: String,
+        value: Float?,
+    ) {
+        eventDao.insert(
+            WhoopEventEntity(
+                sessionId = sessionId,
+                tsSeconds = tsSeconds,
+                eventType = eventType,
+                valueFloat = value,
+            )
+        )
+    }
 
-    // ── Maintenance ───────────────────────────────────────────────────────────
+    // Raw reads for post-session processing
+
+    suspend fun getRawPpgForSession(sessionId: Long): List<RawPpgEntity> =
+        ppgDao.getBySession(sessionId)
+
+    suspend fun getRawImuForSession(sessionId: Long): List<RawImuEntity> =
+        imuDao.getBySession(sessionId)
+
+    // Maintenance
 
     suspend fun purgeOldRawData(retentionDays: Int = 7): Pair<Int, Int> {
         val cutoff = Instant.now().epochSecond - retentionDays * 86_400L

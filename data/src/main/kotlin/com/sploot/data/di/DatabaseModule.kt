@@ -18,6 +18,7 @@ object DatabaseModule {
     @Singleton
     fun provideSplootDatabase(@ApplicationContext context: Context): SplootDatabase =
         Room.databaseBuilder(context, SplootDatabase::class.java, "sploot.db")
+            .fallbackToDestructiveMigration()
             .build()
 
     @Provides fun provideRecordingSessionDao(db: SplootDatabase) = db.recordingSessionDao()
@@ -29,4 +30,10 @@ object DatabaseModule {
     @Provides fun provideSleepEpochDao(db: SplootDatabase)       = db.sleepEpochDao()
     @Provides fun provideGarminGroundTruthDao(db: SplootDatabase) = db.garminGroundTruthDao()
     @Provides fun provideWhoopEventDao(db: SplootDatabase)        = db.whoopEventDao()
+    @Provides fun provideAlgorithmRevisionDao(db: SplootDatabase) = db.algorithmRevisionDao()
+    @Provides fun provideAlgorithmEvaluationDao(db: SplootDatabase) = db.algorithmEvaluationDao()
+    @Provides fun provideImportedArtifactDao(db: SplootDatabase) = db.importedArtifactDao()
+    @Provides fun provideActivitySessionDao(db: SplootDatabase) = db.activitySessionDao()
+    @Provides fun provideExternalHeartRateSampleDao(db: SplootDatabase) = db.externalHeartRateSampleDao()
+    @Provides fun provideDailyMetricSummaryDao(db: SplootDatabase) = db.dailyMetricSummaryDao()
 }

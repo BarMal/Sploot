@@ -14,8 +14,12 @@ object HrvCalculator {
     /** Root mean square of successive differences. */
     fun rmssd(ibiMs: FloatArray): Float {
         if (ibiMs.size < 2) return 0f
-        val sumSqDiff = ibiMs.zipWithNext { a, b -> (b - a) * (b - a) }.sum()
-        return sqrt(sumSqDiff / (ibiMs.size - 1))
+        var sumSqDiff = 0f
+        for (index in 1 until ibiMs.size) {
+            val diff = ibiMs[index] - ibiMs[index - 1]
+            sumSqDiff += diff * diff
+        }
+        return sqrt(sumSqDiff / (ibiMs.size - 1).toFloat())
     }
 
     /** Standard deviation of all NN intervals. */
@@ -29,7 +33,12 @@ object HrvCalculator {
     /** Percentage of successive differences > 50 ms. */
     fun pnn50(ibiMs: FloatArray): Float {
         if (ibiMs.size < 2) return 0f
-        val count = ibiMs.zipWithNext { a, b -> kotlin.math.abs(b - a) > 50f }.count { it }
+        var count = 0
+        for (index in 1 until ibiMs.size) {
+            if (kotlin.math.abs(ibiMs[index] - ibiMs[index - 1]) > 50f) {
+                count++
+            }
+        }
         return count.toFloat() / (ibiMs.size - 1) * 100f
     }
 

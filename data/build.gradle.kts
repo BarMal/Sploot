@@ -9,11 +9,16 @@ android {
     namespace  = "com.sploot.data"
     compileSdk = 35
     defaultConfig { minSdk = 26 }
+    sourceSets["androidTest"].assets.srcDir("$projectDir/schemas")
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
     }
     kotlinOptions { jvmTarget = "11" }
+}
+
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
 }
 
 dependencies {

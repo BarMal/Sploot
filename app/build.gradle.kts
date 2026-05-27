@@ -42,6 +42,7 @@ dependencies {
     implementation(project(":data"))
     implementation(project(":whoop-ble"))
     implementation(project(":garmin-import"))
+    implementation(project(":signal-proc"))
 
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.ui)

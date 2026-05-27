@@ -1,13 +1,18 @@
 *.iml
 .gradle
+.kotlin
 /local.properties
 /.idea
 .DS_Store
 /build
+**/build/
 /captures
 .externalNativeBuild
 .cxx
 local.properties
+*.hprof
+.claude/
+/data/schemas/
 
-# Gradle wrapper JAR (binary — generate with `gradle wrapper`)
+# Gradle wrapper JAR (binary - generate with `gradle wrapper`)
 gradle/wrapper/gradle-wrapper.jar

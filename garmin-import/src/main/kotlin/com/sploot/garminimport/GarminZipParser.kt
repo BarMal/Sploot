@@ -4,27 +4,17 @@ import android.content.ContentResolver
 import android.net.Uri
 import com.sploot.data.dao.GarminGroundTruthDao
 import com.sploot.data.entity.GarminGroundTruthEntity
+import com.sploot.data.repository.AlgorithmReviewRepository
+import com.sploot.data.repository.SleepRepository
 import timber.log.Timber
 import java.util.zip.ZipInputStream
 import javax.inject.Inject
 
-/**
- * Streams a Garmin Connect health export ZIP (selected via SAF) and extracts
- * sleep and HRV JSON files into the local database.
- *
- * Garmin export archive layout (relevant files):
- *   DI_CONNECT/DI-Connect-Wellness/
- *     sleep_YYYYMMDDTHHMMSS.json    — sleep sessions with per-epoch stage labels
- *     hrv_status_YYYYMMDD.json      — weekly HRV status + last-night average
- *   DI_CONNECT/DI-Connect-Fitnes/
- *     ... (activity FIT files — not parsed here)
- *
- * Uses ZipInputStream to stream entries without loading the full archive
- * into memory (Garmin archives can be 200+ MB).
- */
 class GarminZipParser @Inject constructor(
     private val contentResolver: ContentResolver,
     private val garminDao: GarminGroundTruthDao,
+    private val sleepRepository: SleepRepository,
+    private val reviewRepository: AlgorithmReviewRepository,
     private val sleepMapper: GarminSleepMapper,
 ) {
 
@@ -36,8 +26,8 @@ class GarminZipParser @Inject constructor(
 
     suspend fun parseAndStore(zipUri: Uri): ImportResult {
         var sleepCount = 0
-        var hrvCount   = 0
-        val errors     = mutableListOf<String>()
+        var hrvCount = 0
+        val errors = mutableListOf<String>()
 
         contentResolver.openInputStream(zipUri)?.use { inputStream ->
             ZipInputStream(inputStream).use { zip ->
@@ -51,9 +41,32 @@ class GarminZipParser @Inject constructor(
                                 val date = sleepMapper.extractDate(name)
                                 if (date != null) {
                                     val existing = garminDao.getByDate(date)
-                                    garminDao.upsert((existing ?: GarminGroundTruthEntity(date = date))
-                                        .copy(sleepJson = json))
-                                    sleepMapper.parseSleepEpochs(json, date)  // Phase 3: persist epochs
+                                    garminDao.upsert(
+                                        (existing ?: GarminGroundTruthEntity(
+                                            date = date,
+                                            sleepJson = null,
+                                            hrvJson = null,
+                                            bodyBatteryJson = null,
+                                        )).copy(sleepJson = json)
+                                    )
+
+                                    sleepMapper.parseSleep(json, date)?.let { parsed ->
+                                        val garminSessionId = sleepRepository.replaceImportedGarminSession(
+                                            session = parsed.session,
+                                            epochs = parsed.epochs,
+                                        )
+
+                                        sleepRepository.getSessionsInRange(
+                                            parsed.session.startEpochSeconds,
+                                            parsed.session.endEpochSeconds,
+                                        )
+                                            .filter { it.source.name == "ALGO" }
+                                            .forEach { algoSession ->
+                                                reviewRepository.evaluateAgainstGarmin(algoSession.id)
+                                            }
+
+                                        Timber.d("Stored Garmin session $garminSessionId for $date")
+                                    }
                                     sleepCount++
                                 }
                             }
@@ -63,8 +76,14 @@ class GarminZipParser @Inject constructor(
                                 val date = sleepMapper.extractDate(name)
                                 if (date != null) {
                                     val existing = garminDao.getByDate(date)
-                                    garminDao.upsert((existing ?: GarminGroundTruthEntity(date = date))
-                                        .copy(hrvJson = json))
+                                    garminDao.upsert(
+                                        (existing ?: GarminGroundTruthEntity(
+                                            date = date,
+                                            sleepJson = null,
+                                            hrvJson = null,
+                                            bodyBatteryJson = null,
+                                        )).copy(hrvJson = json)
+                                    )
                                     hrvCount++
                                 }
                             }
@@ -82,10 +101,4 @@ class GarminZipParser @Inject constructor(
         Timber.i("Garmin import complete: $sleepCount sleep days, $hrvCount HRV days, ${errors.size} errors")
         return ImportResult(sleepCount, hrvCount, errors)
     }
-
-    // Extension to allow modifying a copy of an entity (since it's a data class)
-    private fun GarminGroundTruthEntity.copy(
-        sleepJson: String? = this.sleepJson,
-        hrvJson:   String? = this.hrvJson,
-    ) = GarminGroundTruthEntity(date, sleepJson, hrvJson, bodyBatteryJson, importedAtMillis)
 }

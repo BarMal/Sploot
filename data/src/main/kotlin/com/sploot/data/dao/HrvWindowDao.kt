@@ -24,4 +24,8 @@ interface HrvWindowDao {
         WHERE windowStartSeconds > :fromSeconds
     """)
     suspend fun averageRmssdSince(fromSeconds: Long): Float?
+
+    /** All windows recorded after [fromSeconds] — used for 7-day sparkline. */
+    @Query("SELECT * FROM hrv_windows WHERE windowStartSeconds > :fromSeconds ORDER BY windowStartSeconds ASC")
+    suspend fun getWindowsSince(fromSeconds: Long): List<HrvWindowEntity>
 }

@@ -10,6 +10,7 @@ data class SleepSessionEntity(
     val endSeconds: Long,
     /** "ALGO" | "GARMIN" */
     val source: String,
+    val algorithmRevisionId: Long?,
     val totalScore: Int?,
     val deepMinutes: Int,
     val lightMinutes: Int,

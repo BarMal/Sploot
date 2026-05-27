@@ -14,8 +14,10 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Process
 import androidx.core.app.NotificationCompat
+import androidx.work.WorkManager
 import com.sploot.app.MainActivity
 import com.sploot.app.R
+import com.sploot.app.worker.SleepProcessingWorker
 import com.sploot.data.repository.RecordingRepository
 import com.sploot.whoopble.gatt.ConnectionState
 import com.sploot.whoopble.gatt.WhoopGattManager
@@ -98,6 +100,10 @@ class WhoopRecordingService : Service() {
             if (currentSessionId >= 0) {
                 recordingRepo.endSession(currentSessionId)
                 Timber.i("Recording session ended: $currentSessionId")
+                // Kick off sleep-stage processing in the background
+                WorkManager.getInstance(applicationContext)
+                    .enqueue(SleepProcessingWorker.buildRequest(currentSessionId))
+                Timber.i("SleepProcessingWorker enqueued for session $currentSessionId")
             }
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()

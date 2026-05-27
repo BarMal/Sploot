@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
@@ -34,6 +35,7 @@ import com.sploot.app.ui.Routes
  *   - 7-day RMSSD sparkline
  *   - Whoop connection status chip
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DashboardScreen(nav: NavController) {
     Scaffold(
