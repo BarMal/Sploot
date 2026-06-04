@@ -46,15 +46,32 @@ object WhoopConstants {
 
     // ── Record type bytes (byte 1 of inner content in DATA frames) ───────────
 
-    const val RECORD_TYPE_IMU: Int = 0x10  // R10
-    const val RECORD_TYPE_PPG: Int = 0x21  // R21
+    const val RECORD_TYPE_REALTIME_HR_SUMMARY: Int = 2
+    const val RECORD_TYPE_R7: Int = 7
+    const val RECORD_TYPE_R9: Int = 9
+    const val RECORD_TYPE_IMU: Int = 10   // R10
+    const val RECORD_TYPE_COMPANION_IMU: Int = 11   // R11
+    const val RECORD_TYPE_R12: Int = 12
+    const val RECORD_TYPE_R18: Int = 18
+    const val RECORD_TYPE_R20: Int = 20
+    const val RECORD_TYPE_PPG: Int = 21   // R21
+    const val RECORD_TYPE_R24: Int = 24
 
     // ── Event type values (uint16 at inner content offset 2 in EVENT frames) ─
 
     const val EVENT_BATTERY:   Int = 3
     const val EVENT_WRIST_ON:  Int = 9
     const val EVENT_WRIST_OFF: Int = 10
+    const val EVENT_DOUBLE_TAP: Int = 14
+    const val EVENT_SET_RTC: Int = 16
     const val EVENT_TEMP:      Int = 17
+    const val EVENT_CAPTOUCH_AUTOTHRESHOLD_ACTION: Int = 32
+    const val EVENT_BLE_REALTIME_HR_ON: Int = 33
+    const val EVENT_BLE_REALTIME_HR_OFF: Int = 34
+    const val EVENT_BLE_SYSTEM_INITIALIZED: Int = 45
+    const val EVENT_HAPTICS_FIRED: Int = 60
+    const val EVENT_EXTENDED_BATTERY_INFORMATION: Int = 63
+    const val EVENT_HAPTICS_TERMINATED: Int = 100
 
     // ── Sequence number ──────────────────────────────────────────────────────
 
@@ -69,12 +86,26 @@ object WhoopConstants {
 
     const val CMD_TYPE_COMMAND: Int = 0x23
 
+    /** Enables realtime HR telemetry. Payload: [0x01] on, [0x00] off. */
+    const val CMD_ENABLE_HR: Int = 0x03
+
+    /** Set strap RTC to current Unix epoch seconds. Payload: uint32 LE seconds. */
+    const val CMD_SET_CLOCK: Int = 0x0A
+
+    /** Poll the current battery level on demand. */
+    const val CMD_GET_BATTERY_LEVEL: Int = 0x1A
+
+    /** Return device info including battery, RTC, firmware, and wrist state. */
+    const val CMD_GET_HELLO_HARVARD: Int = 0x23
+
     /** Enables R10 (HR + IMU) streaming.  Payload: [0x01]. */
     const val CMD_ENABLE_IMU: Int = 0x3F
 
     /** Enables R21 (PPG) streaming — send both commands.  Payload: [0x01]. */
     const val CMD_ENABLE_PPG_1: Int = 0x9A
     const val CMD_ENABLE_PPG_2: Int = 0x6C
+    const val CMD_RUN_HAPTICS_PATTERN: Int = 0x4F
+    const val CMD_STOP_HAPTICS: Int = 0x7A
 
     // ── Five hardcoded initialisation packets ────────────────────────────────
     //
@@ -135,7 +166,7 @@ object WhoopConstants {
 
     object DataHeader {
         // inner[0] = frame type (DATA = 0x28 / 0x2F / 0x2B — varies)
-        // inner[1] = record_type (0x10 or 0x21)
+        // inner[1] = record_type (decimal 10 / 11 / 21 etc., per whoopsie-protocol)
         // inner[2] = sequence number
         // inner[3..6] = j_field (4 bytes, opaque)
         const val OFFSET_TS_SECONDS    = 7   // uint32 LE  (Unix epoch seconds)

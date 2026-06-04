@@ -13,4 +13,13 @@ interface WhoopEventDao {
 
     @Query("SELECT * FROM whoop_events WHERE sessionId = :sessionId ORDER BY tsSeconds ASC")
     suspend fun getBySession(sessionId: Long): List<WhoopEventEntity>
+
+    @Query("SELECT * FROM whoop_events WHERE tsSeconds >= :fromSeconds AND eventType = :eventType ORDER BY tsSeconds ASC")
+    suspend fun getByTypeSince(fromSeconds: Long, eventType: String): List<WhoopEventEntity>
+
+    @Query("SELECT COUNT(*) FROM whoop_events WHERE sessionId = :sessionId")
+    suspend fun countForSession(sessionId: Long): Int
+
+    @Query("SELECT MAX(tsSeconds) FROM whoop_events")
+    suspend fun getLatestTimestamp(): Long?
 }

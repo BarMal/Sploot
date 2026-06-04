@@ -8,7 +8,7 @@ plugins {
 
 android {
     namespace   = "com.sploot.app"
-    compileSdk  = 35
+    compileSdk  = 36
 
     defaultConfig {
         applicationId          = "com.sploot.app"
@@ -47,6 +47,7 @@ dependencies {
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.ui)
     implementation(libs.compose.ui.tooling.preview)
+    implementation(libs.compose.material)
     implementation(libs.compose.material3)
     implementation(libs.compose.material.icons.extended)
     implementation(libs.activity.compose)
@@ -66,6 +67,7 @@ dependencies {
     implementation(libs.vico.compose)
     implementation(libs.timber)
     implementation(libs.core.ktx)
+    implementation(libs.health.connect.client)
 
     testImplementation(libs.junit)
 }

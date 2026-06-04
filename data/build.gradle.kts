@@ -7,7 +7,7 @@ plugins {
 
 android {
     namespace  = "com.sploot.data"
-    compileSdk = 35
+    compileSdk = 36
     defaultConfig { minSdk = 26 }
     sourceSets["androidTest"].assets.srcDir("$projectDir/schemas")
     compileOptions {

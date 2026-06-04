@@ -33,7 +33,12 @@ object DatabaseModule {
     @Provides fun provideAlgorithmRevisionDao(db: SplootDatabase) = db.algorithmRevisionDao()
     @Provides fun provideAlgorithmEvaluationDao(db: SplootDatabase) = db.algorithmEvaluationDao()
     @Provides fun provideImportedArtifactDao(db: SplootDatabase) = db.importedArtifactDao()
+    @Provides fun provideActivityEvaluationDao(db: SplootDatabase) = db.activityEvaluationDao()
     @Provides fun provideActivitySessionDao(db: SplootDatabase) = db.activitySessionDao()
+    @Provides fun provideActivityLapDao(db: SplootDatabase) = db.activityLapDao()
+    @Provides fun provideActivityTrackPointDao(db: SplootDatabase) = db.activityTrackPointDao()
     @Provides fun provideExternalHeartRateSampleDao(db: SplootDatabase) = db.externalHeartRateSampleDao()
     @Provides fun provideDailyMetricSummaryDao(db: SplootDatabase) = db.dailyMetricSummaryDao()
+    @Provides fun provideTrainingExampleDao(db: SplootDatabase) = db.trainingExampleDao()
+    @Provides fun provideWhoopUnknownObservationDao(db: SplootDatabase) = db.whoopUnknownObservationDao()
 }

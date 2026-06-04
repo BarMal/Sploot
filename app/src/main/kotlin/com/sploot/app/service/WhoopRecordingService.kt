@@ -11,21 +11,35 @@ import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.content.Intent
+import android.content.BroadcastReceiver
+import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.os.Build
+import android.os.PowerManager
 import android.os.Process
 import androidx.core.app.NotificationCompat
+import androidx.core.app.RemoteInput
 import androidx.work.WorkManager
 import com.sploot.app.MainActivity
 import com.sploot.app.R
+import com.sploot.app.settings.AppSettingsRepository
+import com.sploot.app.sync.WhoopSyncCoordinator
+import com.sploot.app.worker.ActivityProcessingWorker
 import com.sploot.app.worker.SleepProcessingWorker
 import com.sploot.data.repository.RecordingRepository
+import com.sploot.data.repository.UnknownObservationRecordResult
+import com.sploot.data.repository.WhoopUnknownObservationRepository
 import com.sploot.whoopble.gatt.ConnectionState
+import com.sploot.whoopble.gatt.WhoopSessionMode
+import com.sploot.whoopble.gatt.WhoopStreamConfig
 import com.sploot.whoopble.gatt.WhoopGattManager
+import com.sploot.whoopble.model.WhoopUnknownObservation
 import com.sploot.whoopble.model.WhoopRecord
 import com.sploot.whoopble.protocol.WhoopConstants
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -50,45 +64,176 @@ class WhoopRecordingService : Service() {
 
     @Inject lateinit var gattManager: WhoopGattManager
     @Inject lateinit var recordingRepo: RecordingRepository
+    @Inject lateinit var settingsRepository: AppSettingsRepository
+    @Inject lateinit var unknownObservationRepository: WhoopUnknownObservationRepository
+    @Inject lateinit var whoopSyncCoordinator: WhoopSyncCoordinator
+    @Inject lateinit var whoopRuntimeCoordinator: WhoopRuntimeCoordinator
 
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var currentSessionId = -1L
+    private var recordCollectorJob: Job? = null
+    private var lastPersistedImuSecond: Long? = null
+    private var lastPersistedPpgSecond: Long? = null
+    private var lastPersistedHrSecond: Long? = null
+    private var batterySaverActive = false
+    private var currentMode = WhoopSessionMode.LIVE_RECORDING
+    private var startupMode: WhoopSessionMode? = null
+    private var syncCutoffSeconds: Long? = null
+    private var pendingHistoricalSyncAfterStop = false
+    private var pendingLiveRestartAfterStop = false
+    private var unknownCollectorJob: Job? = null
+    private var lastUnknownPromptAtMs = 0L
+
+    private val powerSaveReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action != PowerManager.ACTION_POWER_SAVE_MODE_CHANGED) return
+
+            val wasActive = batterySaverActive
+            batterySaverActive = isSystemBatterySaverOn()
+            if (wasActive == batterySaverActive) return
+
+            serviceScope.launch {
+                applyBatterySaverProfileIfRecording()
+            }
+        }
+    }
 
     // ── Service lifecycle ─────────────────────────────────────────────────────
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+        createUnknownPromptChannel()
+        batterySaverActive = isSystemBatterySaverOn()
+        registerPowerSaveReceiver()
     }
 
     override fun onBind(intent: Intent?) = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_START -> startRecording()
-            ACTION_STOP  -> stopRecording()
+            ACTION_START -> handleStartRecording()
+            ACTION_SYNC_HISTORY -> handleStartHistoricalSync(
+                autoStartLiveAfter = intent.getBooleanExtra(EXTRA_AUTO_START_LIVE_AFTER, false)
+            )
+            ACTION_STOP  -> {
+                pendingHistoricalSyncAfterStop = false
+                pendingLiveRestartAfterStop = false
+                stopRecording()
+            }
         }
         return START_STICKY
     }
 
     override fun onDestroy() {
         serviceScope.cancel()
+        unregisterReceiver(powerSaveReceiver)
         gattManager.disconnect()
+        whoopSyncCoordinator.markSyncFinished()
+        whoopRuntimeCoordinator.setState(WhoopRuntimeState.IDLE)
         super.onDestroy()
     }
 
     // ── Recording control ─────────────────────────────────────────────────────
 
+    private fun handleStartRecording() {
+        if (startupMode == WhoopSessionMode.LIVE_RECORDING) return
+        if (currentSessionId >= 0L) {
+            if (currentMode == WhoopSessionMode.LIVE_RECORDING) return
+            pendingHistoricalSyncAfterStop = false
+            pendingLiveRestartAfterStop = true
+            whoopRuntimeCoordinator.setState(WhoopRuntimeState.SWITCHING_TO_LIVE)
+            stopRecording()
+            return
+        }
+
+        pendingHistoricalSyncAfterStop = false
+        pendingLiveRestartAfterStop = false
+        startRecording()
+    }
+
+    private fun handleStartHistoricalSync(autoStartLiveAfter: Boolean) {
+        if (startupMode == WhoopSessionMode.HISTORICAL_SYNC) return
+        whoopSyncCoordinator.markSyncStarted()
+        val shouldResumeLiveAfterSync = autoStartLiveAfter || currentMode == WhoopSessionMode.LIVE_RECORDING
+        if (currentSessionId >= 0L) {
+            if (currentMode == WhoopSessionMode.HISTORICAL_SYNC) return
+            pendingHistoricalSyncAfterStop = true
+            pendingLiveRestartAfterStop = shouldResumeLiveAfterSync
+            whoopRuntimeCoordinator.setState(WhoopRuntimeState.SWITCHING_TO_HISTORY)
+            stopRecording()
+            return
+        }
+
+        pendingHistoricalSyncAfterStop = false
+        startHistoricalSync(autoStartLiveAfter = shouldResumeLiveAfterSync)
+    }
+
     private fun startRecording() {
+        currentMode = WhoopSessionMode.LIVE_RECORDING
+        startupMode = WhoopSessionMode.LIVE_RECORDING
+        syncCutoffSeconds = null
+        whoopRuntimeCoordinator.setState(WhoopRuntimeState.STARTING_LIVE)
         startForeground(NOTIF_ID, buildNotification("Searching for WHOOP…"))
         serviceScope.launch {
             currentSessionId = recordingRepo.startSession()
+            startupMode = null
+            lastPersistedImuSecond = null
+            lastPersistedPpgSecond = null
+            lastPersistedHrSecond = null
             Timber.i("Recording session started: $currentSessionId")
             try {
-                connectWithRetry()
-                collectRecords()
+                recordCollectorJob?.cancel()
+                recordCollectorJob = launch { collectRecords() }
+                unknownCollectorJob?.cancel()
+                unknownCollectorJob = launch { collectUnknownObservations() }
+                connectWithRetry(currentMode)
+                whoopRuntimeCoordinator.setState(WhoopRuntimeState.LIVE)
             } catch (e: Exception) {
+                startupMode = null
                 Timber.e(e, "Recording session failed")
+                whoopRuntimeCoordinator.setState(WhoopRuntimeState.ERROR)
+                stopSelf()
+            }
+        }
+    }
+
+    private fun startHistoricalSync(autoStartLiveAfter: Boolean = false) {
+        currentMode = WhoopSessionMode.HISTORICAL_SYNC
+        startupMode = WhoopSessionMode.HISTORICAL_SYNC
+        syncCutoffSeconds = null
+        pendingLiveRestartAfterStop = autoStartLiveAfter
+        whoopRuntimeCoordinator.setState(WhoopRuntimeState.STARTING_HISTORY)
+        startForeground(NOTIF_ID, buildNotification("Syncing WHOOP history…"))
+        serviceScope.launch {
+            syncCutoffSeconds = recordingRepo.getLatestStoredTimestamp()
+            updateNotification(
+                if (syncCutoffSeconds == null) {
+                    "No WHOOP history stored yet - pulling full strap history"
+                } else {
+                    "Syncing WHOOP history since $syncCutoffSeconds"
+                }
+            )
+            currentSessionId = recordingRepo.startSession()
+            startupMode = null
+            lastPersistedImuSecond = null
+            lastPersistedPpgSecond = null
+            lastPersistedHrSecond = null
+            try {
+                recordCollectorJob?.cancel()
+                recordCollectorJob = launch { collectRecords() }
+                unknownCollectorJob?.cancel()
+                unknownCollectorJob = launch { collectUnknownObservations() }
+                connectWithRetry(currentMode)
+                whoopRuntimeCoordinator.setState(WhoopRuntimeState.HISTORY)
+                gattManager.awaitHistoricalSyncCompletion()
+                delay(1_000L)
+                stopRecording()
+            } catch (e: Exception) {
+                startupMode = null
+                Timber.e(e, "Historical sync failed")
+                whoopSyncCoordinator.markSyncFinished()
+                whoopRuntimeCoordinator.setState(WhoopRuntimeState.ERROR)
                 stopSelf()
             }
         }
@@ -96,31 +241,77 @@ class WhoopRecordingService : Service() {
 
     private fun stopRecording() {
         serviceScope.launch {
+            val restartHistorical = pendingHistoricalSyncAfterStop
+            val restartLive = pendingLiveRestartAfterStop
+            pendingHistoricalSyncAfterStop = false
+            pendingLiveRestartAfterStop = false
+            startupMode = null
+            val wasHistoricalSync = currentMode == WhoopSessionMode.HISTORICAL_SYNC
+            recordCollectorJob?.cancel()
+            recordCollectorJob = null
+            unknownCollectorJob?.cancel()
+            unknownCollectorJob = null
+            runCatching { gattManager.disableActiveStreams() }
+                .onFailure { Timber.w(it, "Failed to disable WHOOP streams before disconnect") }
             gattManager.disconnect()
             if (currentSessionId >= 0) {
-                recordingRepo.endSession(currentSessionId)
-                Timber.i("Recording session ended: $currentSessionId")
-                // Kick off sleep-stage processing in the background
-                WorkManager.getInstance(applicationContext)
-                    .enqueue(SleepProcessingWorker.buildRequest(currentSessionId))
-                Timber.i("SleepProcessingWorker enqueued for session $currentSessionId")
+                val sessionId = currentSessionId
+                recordingRepo.endSession(sessionId)
+                val hasAnyData = recordingRepo.sessionHasAnyData(sessionId)
+                if (!hasAnyData) {
+                    recordingRepo.deleteSession(sessionId)
+                    Timber.i("Dropped empty WHOOP session: $sessionId")
+                } else {
+                    Timber.i("Recording session ended: $sessionId")
+                    enqueueProcessingWorkers(sessionId)
+                }
             }
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
+            currentSessionId = -1L
+            syncCutoffSeconds = null
+            if (wasHistoricalSync) {
+                whoopSyncCoordinator.markSyncFinished()
+            }
+            when {
+                restartHistorical -> {
+                    whoopRuntimeCoordinator.setState(WhoopRuntimeState.SWITCHING_TO_HISTORY)
+                    startHistoricalSync(autoStartLiveAfter = restartLive)
+                }
+                restartLive -> {
+                    whoopRuntimeCoordinator.setState(WhoopRuntimeState.SWITCHING_TO_LIVE)
+                    startRecording()
+                }
+                else -> {
+                    whoopRuntimeCoordinator.setState(WhoopRuntimeState.STOPPING)
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    whoopRuntimeCoordinator.setState(WhoopRuntimeState.IDLE)
+                    stopSelf()
+                }
+            }
         }
     }
 
     // ── BLE connection with exponential backoff ───────────────────────────────
 
-    private suspend fun connectWithRetry() {
+    private suspend fun connectWithRetry(mode: WhoopSessionMode) {
         var backoffMs = 2_000L
 
         repeat(6) { attempt ->
             try {
-                val device = scanForWhoop() ?: throw IOException("No WHOOP device found")
+                val device = resolveWhoopDevice() ?: throw IOException("No WHOOP device found")
                 updateNotification("Connecting to ${device.name}…")
-                gattManager.connect(device)
-                updateNotification("WHOOP connected — recording")
+                val settings = effectiveSettings()
+                gattManager.connect(
+                    device = device,
+                    streamConfig = buildStreamConfig(settings),
+                    sessionMode = mode,
+                )
+                updateNotification(
+                    if (mode == WhoopSessionMode.HISTORICAL_SYNC) {
+                        "WHOOP connected — syncing history"
+                    } else {
+                        "WHOOP connected — recording"
+                    }
+                )
                 return
             } catch (e: Exception) {
                 Timber.w(e, "Connect attempt $attempt failed, retry in ${backoffMs}ms")
@@ -132,6 +323,15 @@ class WhoopRecordingService : Service() {
         }
         throw IOException("Failed to connect to WHOOP after 6 attempts")
     }
+
+    private suspend fun resolveWhoopDevice() =
+        preferredWhoopDevice() ?: scanForWhoop()
+
+    private fun preferredWhoopDevice() =
+        settingsRepository.current().preferredWhoopDeviceAddress?.let { address ->
+            val btManager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
+            runCatching { btManager.adapter.getRemoteDevice(address) }.getOrNull()
+        }
 
     private suspend fun scanForWhoop() = withTimeoutOrNull(20_000L) {
         suspendCancellableCoroutine { cont ->
@@ -174,45 +374,344 @@ class WhoopRecordingService : Service() {
 
     private suspend fun collectRecords() {
         gattManager.records.collect { record ->
+            val settings = effectiveSettings()
             when (record) {
-                is WhoopRecord.Imu ->
-                    recordingRepo.insertImu(
-                        sessionId = currentSessionId,
-                        tsSeconds = record.timestamp.epochSecond,
-                        hrBpm     = record.hrBpm,
-                        accelX    = record.accelX.toLeBytes(),
-                        accelY    = record.accelY.toLeBytes(),
-                        accelZ    = record.accelZ.toLeBytes(),
-                        gyroX     = record.gyroX.toLeBytes(),
-                        gyroY     = record.gyroY.toLeBytes(),
-                        gyroZ     = record.gyroZ.toLeBytes(),
-                    )
+                is WhoopRecord.Imu -> {
+                    if (!settings.enableWhoopImuStream) return@collect
+                    val tsSeconds = record.timestamp.epochSecond
+                    if (shouldSkipHistoricalRecord(tsSeconds)) return@collect
+                    if (shouldPersist(tsSeconds, lastPersistedImuSecond, settings.effectiveImuIntervalSeconds())) {
+                        recordingRepo.insertImu(
+                            sessionId = currentSessionId,
+                            tsSeconds = tsSeconds,
+                            hrBpm     = record.hrBpm,
+                            accelX    = record.accelX.toLeBytes(),
+                            accelY    = record.accelY.toLeBytes(),
+                            accelZ    = record.accelZ.toLeBytes(),
+                            gyroX     = record.gyroX.toLeBytes(),
+                            gyroY     = record.gyroY.toLeBytes(),
+                            gyroZ     = record.gyroZ.toLeBytes(),
+                        )
+                        lastPersistedImuSecond = tsSeconds
+                        lastPersistedHrSecond = tsSeconds
+                    } else if (
+                        settings.enableWhoopHrStream &&
+                        shouldPersist(tsSeconds, lastPersistedHrSecond, settings.effectiveHrIntervalSeconds())
+                    ) {
+                        recordingRepo.insertHrSample(
+                            sessionId = currentSessionId,
+                            tsSeconds = tsSeconds,
+                            hrBpm = record.hrBpm,
+                        )
+                        lastPersistedHrSecond = tsSeconds
+                    }
+                }
 
-                is WhoopRecord.Ppg ->
-                    recordingRepo.insertPpg(
-                        sessionId = currentSessionId,
-                        tsSeconds = record.timestamp.epochSecond,
-                        ledDrive  = record.ledDrive,
-                        channelA  = record.channelA.toUInt16Bytes(),
-                        channelB  = record.channelB.toUInt16Bytes(),
-                        channelC  = record.channelC.toUInt16Bytes(),
-                        channelD  = record.channelD.toUInt16Bytes(),
-                        channelE  = record.channelE.toUInt16Bytes(),
-                        channelF  = record.channelF.toUInt16Bytes(),
-                    )
+                is WhoopRecord.Ppg -> {
+                    if (!settings.enableWhoopPpgStream) return@collect
+                    val tsSeconds = record.timestamp.epochSecond
+                    if (shouldSkipHistoricalRecord(tsSeconds)) return@collect
+                    if (shouldPersist(tsSeconds, lastPersistedPpgSecond, settings.effectivePpgIntervalSeconds())) {
+                        recordingRepo.insertPpg(
+                            sessionId = currentSessionId,
+                            tsSeconds = tsSeconds,
+                            ledDrive  = record.ledDrive,
+                            channelA  = record.channelA.toUInt16Bytes(),
+                            channelB  = record.channelB.toUInt16Bytes(),
+                            channelC  = record.channelC.toUInt16Bytes(),
+                            channelD  = record.channelD.toUInt16Bytes(),
+                            channelE  = record.channelE.toUInt16Bytes(),
+                            channelF  = record.channelF.toUInt16Bytes(),
+                        )
+                        lastPersistedPpgSecond = tsSeconds
+                    }
+                }
+
+                is WhoopRecord.HeartRate -> {
+                    if (!settings.enableWhoopHrStream) return@collect
+                    val tsSeconds = record.timestamp.epochSecond
+                    if (shouldSkipHistoricalRecord(tsSeconds)) return@collect
+                    if (shouldPersist(tsSeconds, lastPersistedHrSecond, settings.effectiveHrIntervalSeconds())) {
+                        recordingRepo.insertHrSample(
+                            sessionId = currentSessionId,
+                            tsSeconds = tsSeconds,
+                            hrBpm = record.hrBpm,
+                        )
+                        lastPersistedHrSecond = tsSeconds
+                    }
+                }
 
                 is WhoopRecord.Battery ->
-                    recordingRepo.insertEvent(currentSessionId, record.timestamp.epochSecond, "BATTERY", record.percent)
+                    if (settings.captureWhoopEvents) {
+                        val tsSeconds = record.timestamp.epochSecond
+                        if (!shouldSkipHistoricalRecord(tsSeconds)) {
+                            recordingRepo.insertEvent(currentSessionId, tsSeconds, "BATTERY", record.percent)
+                        }
+                    }
 
                 is WhoopRecord.Temperature ->
-                    recordingRepo.insertEvent(currentSessionId, record.timestamp.epochSecond, "TEMP", record.celsius)
+                    if (settings.captureWhoopEvents) {
+                        val tsSeconds = record.timestamp.epochSecond
+                        if (!shouldSkipHistoricalRecord(tsSeconds)) {
+                            recordingRepo.insertEvent(currentSessionId, tsSeconds, "TEMP", record.celsius)
+                        }
+                    }
 
                 is WhoopRecord.WristOn ->
-                    recordingRepo.insertEvent(currentSessionId, record.timestamp.epochSecond, "WRIST_ON", null)
+                    if (settings.captureWhoopEvents) {
+                        val tsSeconds = record.timestamp.epochSecond
+                        if (!shouldSkipHistoricalRecord(tsSeconds)) {
+                            recordingRepo.insertEvent(currentSessionId, tsSeconds, "WRIST_ON", null)
+                        }
+                    }
 
                 is WhoopRecord.WristOff ->
-                    recordingRepo.insertEvent(currentSessionId, record.timestamp.epochSecond, "WRIST_OFF", null)
+                    if (settings.captureWhoopEvents) {
+                        val tsSeconds = record.timestamp.epochSecond
+                        if (!shouldSkipHistoricalRecord(tsSeconds)) {
+                            recordingRepo.insertEvent(currentSessionId, tsSeconds, "WRIST_OFF", null)
+                        }
+                    }
+
+                is WhoopRecord.DoubleTap ->
+                    if (settings.captureWhoopEvents) {
+                        val tsSeconds = record.timestamp.epochSecond
+                        if (!shouldSkipHistoricalRecord(tsSeconds)) {
+                            recordingRepo.insertEvent(currentSessionId, tsSeconds, "DOUBLE_TAP", null)
+                        }
+                    }
+
+                is WhoopRecord.CapTouchAutoThreshold ->
+                    if (settings.captureWhoopEvents) {
+                        val tsSeconds = record.timestamp.epochSecond
+                        if (!shouldSkipHistoricalRecord(tsSeconds)) {
+                            recordingRepo.insertEvent(
+                                currentSessionId,
+                                tsSeconds,
+                                "CAPTOUCH_AUTOTHRESHOLD_ACTION",
+                                null,
+                            )
+                        }
+                    }
+
+                is WhoopRecord.HapticsFired ->
+                    if (settings.captureWhoopEvents) {
+                        val tsSeconds = record.timestamp.epochSecond
+                        if (!shouldSkipHistoricalRecord(tsSeconds)) {
+                            recordingRepo.insertEvent(
+                                currentSessionId,
+                                tsSeconds,
+                                "HAPTICS_FIRED",
+                                record.patternId?.toFloat(),
+                            )
+                        }
+                    }
+
+                is WhoopRecord.HapticsTerminated ->
+                    if (settings.captureWhoopEvents) {
+                        val tsSeconds = record.timestamp.epochSecond
+                        if (!shouldSkipHistoricalRecord(tsSeconds)) {
+                            recordingRepo.insertEvent(
+                                currentSessionId,
+                                tsSeconds,
+                                "HAPTICS_TERMINATED",
+                                record.reasonCode?.toFloat(),
+                            )
+                        }
+                    }
             }
+        }
+    }
+
+    private suspend fun collectUnknownObservations() {
+        gattManager.unknownObservations.collect { observation ->
+            val result = unknownObservationRepository.recordObservation(
+                sessionId = currentSessionId.takeIf { it >= 0 },
+                category = observation.category.name,
+                packetType = observation.packetType,
+                packetTypeName = observation.packetTypeName,
+                identifier = observation.identifier,
+                identifierLabel = observation.identifierLabel,
+                frameSizeBytes = observation.frameSizeBytes,
+                hexPreview = observation.hexPreview,
+                note = observation.note,
+                observedAtSeconds = observation.timestamp.epochSecond,
+            )
+            maybePromptForUnknownObservation(result, observation)
+        }
+    }
+
+    private fun maybePromptForUnknownObservation(
+        result: UnknownObservationRecordResult,
+        observation: WhoopUnknownObservation,
+    ) {
+        val settings = settingsRepository.current()
+        if (!settings.enableWhoopUnknownTagPrompts) return
+        if (!result.isNewSignature) return
+        if (result.entity.userAnnotation != null) return
+        if (!canPostUnknownTagPrompt()) return
+
+        val nowMs = System.currentTimeMillis()
+        if (nowMs - lastUnknownPromptAtMs < UNKNOWN_PROMPT_COOLDOWN_MS) return
+        lastUnknownPromptAtMs = nowMs
+
+        val notificationManager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+        val replyInput = RemoteInput.Builder(WhoopUnknownAnnotationReceiver.KEY_TEXT_REPLY)
+            .setLabel("What were you doing?")
+            .build()
+        val replyIntent = Intent(this, WhoopUnknownAnnotationReceiver::class.java).also {
+            it.action = WhoopUnknownAnnotationReceiver.ACTION_ANNOTATE_UNKNOWN_WHOOP
+            it.putExtra(WhoopUnknownAnnotationReceiver.EXTRA_OBSERVATION_ID, result.entity.id)
+            it.putExtra(
+                WhoopUnknownAnnotationReceiver.EXTRA_NOTIFICATION_ID,
+                WhoopUnknownAnnotationReceiver.UNKNOWN_PROMPT_NOTIFICATION_ID,
+            )
+        }
+        val replyPendingIntent = PendingIntent.getBroadcast(
+            this,
+            result.entity.id.toInt(),
+            replyIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE,
+        )
+        val replyAction = NotificationCompat.Action.Builder(
+            android.R.drawable.ic_menu_edit,
+            "Tag",
+            replyPendingIntent,
+        )
+            .addRemoteInput(replyInput)
+            .setAllowGeneratedReplies(false)
+            .build()
+
+        val notification = NotificationCompat.Builder(this, UNKNOWN_PROMPT_CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_menu_info_details)
+            .setContentTitle("Unknown WHOOP packet")
+            .setContentText(observation.identifierLabel)
+            .setStyle(
+                NotificationCompat.BigTextStyle().bigText(
+                    "${observation.packetTypeName} ${observation.identifierLabel}, ${observation.frameSizeBytes}B\n${observation.hexPreview}"
+                )
+            )
+            .setContentIntent(
+                PendingIntent.getActivity(
+                    this,
+                    result.entity.id.toInt(),
+                    Intent(this, MainActivity::class.java),
+                    PendingIntent.FLAG_IMMUTABLE,
+                )
+            )
+            .addAction(replyAction)
+            .setAutoCancel(true)
+            .setOnlyAlertOnce(true)
+            .setCategory(NotificationCompat.CATEGORY_STATUS)
+            .build()
+
+        notificationManager.notify(
+            WhoopUnknownAnnotationReceiver.UNKNOWN_PROMPT_NOTIFICATION_ID,
+            notification,
+        )
+    }
+
+    private fun enqueueProcessingWorkers(sessionId: Long) {
+        val settings = effectiveSettings()
+        val workManager = WorkManager.getInstance(applicationContext)
+        when {
+            settings.runSleepProcessing && settings.runActivityProcessing -> {
+                workManager.beginWith(SleepProcessingWorker.buildRequest(sessionId))
+                    .then(ActivityProcessingWorker.buildRequest(sessionId))
+                    .enqueue()
+            }
+            settings.runSleepProcessing -> {
+                workManager.enqueue(SleepProcessingWorker.buildRequest(sessionId))
+            }
+            settings.runActivityProcessing -> {
+                workManager.enqueue(ActivityProcessingWorker.buildRequest(sessionId))
+            }
+            else -> {
+                Timber.i("Processing disabled in settings for session $sessionId")
+            }
+        }
+        Timber.i("Processing configuration applied for session $sessionId")
+    }
+
+    private fun shouldPersist(
+        tsSeconds: Long,
+        lastPersistedSecond: Long?,
+        intervalSeconds: Int,
+    ): Boolean = lastPersistedSecond == null || (tsSeconds - lastPersistedSecond) >= intervalSeconds
+
+    private fun shouldSkipHistoricalRecord(tsSeconds: Long): Boolean =
+        currentMode == WhoopSessionMode.HISTORICAL_SYNC &&
+            syncCutoffSeconds != null &&
+            tsSeconds <= syncCutoffSeconds!!
+
+    private suspend fun applyBatterySaverProfileIfRecording() {
+        if (currentSessionId < 0L || gattManager.state.value == ConnectionState.DISCONNECTED) return
+
+        runCatching {
+            gattManager.applyStreamConfig(buildStreamConfig(effectiveSettings()))
+        }.onFailure {
+            Timber.w(it, "Failed to apply Battery Saver WHOOP stream profile")
+        }
+    }
+
+    private fun effectiveSettings(): com.sploot.app.settings.AppSettings =
+        applyBatterySaverOverrides(settingsRepository.current(), batterySaverActive)
+
+    private fun applyBatterySaverOverrides(
+        base: com.sploot.app.settings.AppSettings,
+        isBatterySaverActive: Boolean,
+    ): com.sploot.app.settings.AppSettings {
+        if (!isBatterySaverActive || !base.followSystemBatterySaver) return base
+
+        var updated = base.copy(
+            enableWhoopHrStream = base.enableWhoopHrStream && !base.batterySaverDisableWhoopHrStream,
+            enableWhoopImuStream = base.enableWhoopImuStream && !base.batterySaverDisableWhoopImuStream,
+            enableWhoopPpgStream = base.enableWhoopPpgStream && !base.batterySaverDisableWhoopPpgStream,
+        )
+
+        if (base.batterySaverForceGlobalWhoopInterval) {
+            updated = updated.copy(
+                globalWhoopCaptureIntervalEnabled = true,
+                globalWhoopCaptureIntervalSeconds = base.batterySaverGlobalWhoopIntervalSeconds,
+            )
+        }
+
+        return updated
+    }
+
+    private fun buildStreamConfig(settings: com.sploot.app.settings.AppSettings) = WhoopStreamConfig(
+        enableHr = settings.enableWhoopHrStream,
+        enableImu = settings.enableWhoopImuStream,
+        enablePpg = settings.enableWhoopPpgStream,
+    )
+
+    private fun isSystemBatterySaverOn(): Boolean =
+        (getSystemService(Context.POWER_SERVICE) as PowerManager).isPowerSaveMode
+
+    private fun canPostUnknownTagPrompt(): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            return false
+        }
+
+        val notificationManager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+        val interruptionFilter = runCatching { notificationManager.currentInterruptionFilter }
+            .getOrElse {
+                Timber.w(it, "Unable to read Android interruption filter; suppressing unknown packet prompt")
+                return false
+            }
+        return interruptionFilter == NotificationManager.INTERRUPTION_FILTER_ALL ||
+            interruptionFilter == NotificationManager.INTERRUPTION_FILTER_UNKNOWN
+    }
+
+    private fun registerPowerSaveReceiver() {
+        val filter = IntentFilter(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(powerSaveReceiver, filter, RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            registerReceiver(powerSaveReceiver, filter)
         }
     }
 
@@ -224,6 +723,17 @@ class WhoopRecordingService : Service() {
             getString(R.string.notif_channel_recording),
             NotificationManager.IMPORTANCE_LOW,
         )
+        (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
+            .createNotificationChannel(channel)
+    }
+
+    private fun createUnknownPromptChannel() {
+        val channel = NotificationChannel(
+            UNKNOWN_PROMPT_CHANNEL_ID,
+            "WHOOP packet tags",
+            NotificationManager.IMPORTANCE_DEFAULT,
+        )
+        channel.description = "Optional prompts for annotating unknown WHOOP packet signatures."
         (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
             .createNotificationChannel(channel)
     }
@@ -272,14 +782,27 @@ class WhoopRecordingService : Service() {
 
     companion object {
         const val ACTION_START = "com.sploot.app.START_RECORDING"
+        const val ACTION_SYNC_HISTORY = "com.sploot.app.SYNC_HISTORY"
         const val ACTION_STOP  = "com.sploot.app.STOP_RECORDING"
+        private const val EXTRA_AUTO_START_LIVE_AFTER = "extra_auto_start_live_after"
         private const val CHANNEL_ID = "sploot_recording"
+        private const val UNKNOWN_PROMPT_CHANNEL_ID = "sploot_whoop_packet_tags"
         private const val NOTIF_ID   = 1001
+        private const val UNKNOWN_PROMPT_COOLDOWN_MS = 5 * 60 * 1000L
 
         fun startIntent(context: Context) =
             Intent(context, WhoopRecordingService::class.java).also { it.action = ACTION_START }
 
         fun stopIntent(context: Context) =
             Intent(context, WhoopRecordingService::class.java).also { it.action = ACTION_STOP }
+
+        fun startHistoricalSyncIntent(
+            context: Context,
+            autoStartLiveAfter: Boolean = false,
+        ) =
+            Intent(context, WhoopRecordingService::class.java).also {
+                it.action = ACTION_SYNC_HISTORY
+                it.putExtra(EXTRA_AUTO_START_LIVE_AFTER, autoStartLiveAfter)
+            }
     }
 }

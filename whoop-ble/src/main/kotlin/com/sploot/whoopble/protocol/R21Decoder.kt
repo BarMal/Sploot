@@ -8,7 +8,7 @@ import java.time.Instant
  *
  * R21 inner-content layout (offsets from frame[4]):
  *   offset  0: frame sub-type (1 byte)
- *   offset  1: record type = 0x21 (1 byte)
+ *   offset  1: record type = 21 (R21, decimal)
  *   offset  2: sequence number (1 byte)
  *   offset  3..6: j_field (4 bytes, opaque)
  *   offset  7..10: ts_seconds  uint32 LE
@@ -30,8 +30,14 @@ import java.time.Instant
  */
 object R21Decoder {
 
+    /**
+     * Minimum total frame size needed to read the final Channel F sample.
+     *
+     * As with R10, use the highest offset actually consumed rather than a
+     * nominal packet-size assumption.
+     */
     private const val MIN_FRAME_SIZE =
-        4 + WhoopConstants.R21.INNER_SIZE + 4
+        4 + WhoopConstants.R21.OFFSET_CHANNEL_F + (WhoopConstants.R21.SAMPLES * 2)
 
     /**
      * Decode a complete R21 frame.

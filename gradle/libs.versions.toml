@@ -16,6 +16,7 @@ coreKtx         = "1.15.0"
 activityCompose = "1.9.3"
 hiltNav         = "1.2.0"
 hiltWork        = "1.2.0"
+healthConnect   = "1.1.0"
 
 [libraries]
 # Compose
@@ -23,6 +24,7 @@ compose-bom                 = { group = "androidx.compose",          name = "com
 compose-ui                  = { group = "androidx.compose.ui",       name = "ui" }
 compose-ui-tooling          = { group = "androidx.compose.ui",       name = "ui-tooling" }
 compose-ui-tooling-preview  = { group = "androidx.compose.ui",       name = "ui-tooling-preview" }
+compose-material            = { group = "androidx.compose.material", name = "material" }
 compose-material3           = { group = "androidx.compose.material3", name = "material3" }
 compose-material-icons-extended = { group = "androidx.compose.material", name = "material-icons-extended" }
 activity-compose            = { group = "androidx.activity",          name = "activity-compose",            version.ref = "activityCompose" }
@@ -65,6 +67,7 @@ vico-compose = { group = "com.patrykandpatrick.vico", name = "compose-m3", versi
 # Misc
 timber   = { group = "com.jakewharton.timber", name = "timber",   version.ref = "timber" }
 core-ktx = { group = "androidx.core",          name = "core-ktx", version.ref = "coreKtx" }
+health-connect-client = { group = "androidx.health.connect", name = "connect-client", version.ref = "healthConnect" }
 
 # Testing
 junit = { group = "junit", name = "junit", version = "4.13.2" }

@@ -54,6 +54,12 @@ class SleepRepository @Inject constructor(
     suspend fun getEpochs(sessionId: Long, source: SleepSource): List<SleepEpoch> =
         epochDao.getBySessionAndSource(sessionId, source.name).map { it.toDomain() }
 
+    suspend fun getEpochsSince(
+        fromSeconds: Long,
+        source: SleepSource,
+    ): List<SleepEpoch> =
+        epochDao.getSince(fromSeconds, source.name).map { it.toDomain() }
+
     suspend fun getSessionsInRange(fromSeconds: Long, toSeconds: Long): List<SleepSession> =
         sessionDao.getInRange(fromSeconds, toSeconds).map { it.toDomain() }
 

@@ -16,4 +16,10 @@ interface RawPpgDao {
 
     @Query("DELETE FROM raw_ppg WHERE tsSeconds < :cutoffSeconds")
     suspend fun deleteOlderThan(cutoffSeconds: Long): Int
+
+    @Query("SELECT COUNT(*) FROM raw_ppg WHERE sessionId = :sessionId")
+    suspend fun countForSession(sessionId: Long): Int
+
+    @Query("SELECT MAX(tsSeconds) FROM raw_ppg")
+    suspend fun getLatestTimestamp(): Long?
 }

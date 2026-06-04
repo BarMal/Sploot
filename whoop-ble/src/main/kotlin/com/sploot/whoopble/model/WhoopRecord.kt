@@ -55,13 +55,41 @@ sealed class WhoopRecord {
         val channelF:  IntArray,
     ) : WhoopRecord()
 
+    /** Companion/live HR sample when WHOOP does not provide a full IMU payload. */
+    data class HeartRate(
+        val timestamp: Instant,
+        val hrBpm: Int,
+        val source: String,
+    ) : WhoopRecord()
+
     /** EVENT 17 — skin temperature, reported on-change. */
     data class Temperature(val timestamp: Instant, val celsius: Float) : WhoopRecord()
 
     /** EVENT 3 — battery level, reported on-change. */
-    data class Battery(val timestamp: Instant, val percent: Float) : WhoopRecord()
+    data class Battery(
+        val timestamp: Instant,
+        val percent: Float,
+        val source: String,
+    ) : WhoopRecord()
 
     /** EVENT 9 — wrist detected. */
+    data class DoubleTap(val timestamp: Instant) : WhoopRecord()
+
+    data class CapTouchAutoThreshold(
+        val timestamp: Instant,
+        val payloadHex: String,
+    ) : WhoopRecord()
+
+    data class HapticsFired(
+        val timestamp: Instant,
+        val patternId: Int?,
+    ) : WhoopRecord()
+
+    data class HapticsTerminated(
+        val timestamp: Instant,
+        val reasonCode: Int?,
+    ) : WhoopRecord()
+
     data class WristOn(val timestamp: Instant) : WhoopRecord()
 
     /** EVENT 10 — wrist removed. */

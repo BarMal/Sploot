@@ -30,4 +30,7 @@ interface RecordingSessionDao {
 
     @Query("UPDATE recording_sessions SET isProcessed = 1 WHERE id = :id")
     suspend fun markProcessed(id: Long)
+
+    @Query("DELETE FROM recording_sessions WHERE id = :id")
+    suspend fun deleteById(id: Long)
 }

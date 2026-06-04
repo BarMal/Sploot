@@ -15,6 +15,7 @@ class GarminFileImporter @Inject constructor(
     private val contentResolver: ContentResolver,
     private val canonicalImportRepository: CanonicalImportRepository,
     private val garminCsvParser: GarminCsvParser,
+    private val garminFitParser: GarminFitParser,
     private val garminZipParser: GarminZipParser,
 ) {
 
@@ -72,14 +73,21 @@ class GarminFileImporter @Inject constructor(
                     details = csvResult.details,
                 )
             }
-            "fit" -> ImportResult(
-                displayName = metadata.displayName,
-                fileType = "fit",
-                skippedAsDuplicate = false,
-                inserted = 0,
-                updated = 0,
-                details = "FIT parsing is not implemented yet",
-            )
+            "fit" -> {
+                val fitResult = garminFitParser.parseAndStore(
+                    bytes = bytes,
+                    sourceFileFingerprint = fingerprint,
+                    displayName = metadata.displayName,
+                )
+                ImportResult(
+                    displayName = metadata.displayName,
+                    fileType = "fit",
+                    skippedAsDuplicate = false,
+                    inserted = fitResult.inserted,
+                    updated = fitResult.updated,
+                    details = fitResult.details,
+                )
+            }
             else -> ImportResult(
                 displayName = metadata.displayName,
                 fileType = metadata.extension.ifBlank { "unknown" },
@@ -98,7 +106,6 @@ class GarminFileImporter @Inject constructor(
                 mimeType = metadata.mimeType,
                 extension = metadata.extension,
                 status = when {
-                    result.fileType == "fit" -> "PENDING"
                     result.inserted == 0 && result.updated == 0 -> "IGNORED"
                     else -> "IMPORTED"
                 },

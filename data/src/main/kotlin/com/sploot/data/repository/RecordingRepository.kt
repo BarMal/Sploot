@@ -44,6 +44,13 @@ class RecordingRepository @Inject constructor(
         sessionDao.close(sessionId, Instant.now().epochSecond)
     }
 
+    suspend fun markSessionProcessed(sessionId: Long) {
+        sessionDao.markProcessed(sessionId)
+    }
+
+    suspend fun getSessionById(sessionId: Long): RecordingSessionEntity? =
+        sessionDao.getById(sessionId)
+
     fun sessionsFlow(): Flow<List<RecordingSessionEntity>> = sessionDao.getAllFlow()
 
     // Raw IMU
@@ -111,7 +118,7 @@ class RecordingRepository @Inject constructor(
 
     // Events
 
-    /** @param eventType "BATTERY" | "TEMP" | "WRIST_ON" | "WRIST_OFF" */
+    /** Event names include battery/temp/wrist plus touch and haptics event families. */
     suspend fun insertEvent(
         sessionId: Long,
         tsSeconds: Long,
@@ -135,6 +142,44 @@ class RecordingRepository @Inject constructor(
 
     suspend fun getRawImuForSession(sessionId: Long): List<RawImuEntity> =
         imuDao.getBySession(sessionId)
+
+    suspend fun getHrSamplesForSession(sessionId: Long): List<HrSampleEntity> =
+        hrDao.getBySession(sessionId)
+
+    suspend fun getHrSamplesSince(fromSeconds: Long): List<HrSampleEntity> =
+        hrDao.getSince(fromSeconds)
+
+    suspend fun insertHrSample(
+        sessionId: Long,
+        tsSeconds: Long,
+        hrBpm: Int,
+    ) {
+        hrDao.insert(HrSampleEntity(sessionId, tsSeconds, hrBpm))
+    }
+
+    suspend fun getEventsByTypeSince(
+        fromSeconds: Long,
+        eventType: String,
+    ): List<WhoopEventEntity> =
+        eventDao.getByTypeSince(fromSeconds, eventType)
+
+    suspend fun getLatestStoredTimestamp(): Long? =
+        listOfNotNull(
+            imuDao.getLatestTimestamp(),
+            ppgDao.getLatestTimestamp(),
+            hrDao.getLatestTimestamp(),
+            eventDao.getLatestTimestamp(),
+        ).maxOrNull()
+
+    suspend fun sessionHasAnyData(sessionId: Long): Boolean =
+        imuDao.countForSession(sessionId) > 0 ||
+            ppgDao.countForSession(sessionId) > 0 ||
+            hrDao.countForSession(sessionId) > 0 ||
+            eventDao.countForSession(sessionId) > 0
+
+    suspend fun deleteSession(sessionId: Long) {
+        sessionDao.deleteById(sessionId)
+    }
 
     // Maintenance
 

@@ -17,6 +17,9 @@ interface SleepEpochDao {
     @Query("SELECT * FROM sleep_epochs WHERE sessionId = :sessionId ORDER BY epochStartSeconds ASC")
     suspend fun getBySession(sessionId: Long): List<SleepEpochEntity>
 
+    @Query("SELECT * FROM sleep_epochs WHERE epochStartSeconds >= :fromSeconds AND source = :source ORDER BY epochStartSeconds ASC")
+    suspend fun getSince(fromSeconds: Long, source: String): List<SleepEpochEntity>
+
     @Query("DELETE FROM sleep_epochs WHERE sessionId = :sessionId")
     suspend fun deleteBySessionId(sessionId: Long)
 }

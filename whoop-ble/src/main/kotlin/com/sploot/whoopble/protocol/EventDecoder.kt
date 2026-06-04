@@ -46,13 +46,43 @@ object EventDecoder {
 
             WhoopConstants.EVENT_WRIST_OFF -> WhoopRecord.WristOff(timestamp)
 
+            WhoopConstants.EVENT_DOUBLE_TAP -> WhoopRecord.DoubleTap(timestamp)
+
             WhoopConstants.EVENT_BATTERY -> {
                 // Payload: uint32 LE / 10 → percent
                 val payloadOffset = base + WhoopConstants.EventHeader.PAYLOAD_START
                 if (frame.size < payloadOffset + 4) return null
                 val raw     = frame.getUInt32LE(payloadOffset)
-                val percent = (raw.toFloat() / 10f).coerceIn(0f, 100f)
-                WhoopRecord.Battery(timestamp, percent)
+                val percent = raw.toFloat() / 10f
+                if (percent !in 0f..100f) return null
+                WhoopRecord.Battery(timestamp, percent, "event:battery")
+            }
+
+            WhoopConstants.EVENT_EXTENDED_BATTERY_INFORMATION -> {
+                val payloadOffset = base + WhoopConstants.EventHeader.PAYLOAD_START
+                if (frame.size < payloadOffset + 4) return null
+                val raw     = frame.getUInt32LE(payloadOffset)
+                val percent = raw.toFloat() / 10f
+                if (percent !in 0f..100f) return null
+                WhoopRecord.Battery(timestamp, percent, "event:extended_battery_information")
+            }
+
+            WhoopConstants.EVENT_CAPTOUCH_AUTOTHRESHOLD_ACTION -> {
+                val payloadOffset = base + WhoopConstants.EventHeader.PAYLOAD_START
+                val payload = if (frame.size > payloadOffset) frame.copyOfRange(payloadOffset, frame.size) else byteArrayOf()
+                WhoopRecord.CapTouchAutoThreshold(timestamp, payload.toHexString())
+            }
+
+            WhoopConstants.EVENT_HAPTICS_FIRED -> {
+                val payloadOffset = base + WhoopConstants.EventHeader.PAYLOAD_START
+                val patternId = if (frame.size >= payloadOffset + 4) frame.getUInt32LE(payloadOffset).toInt() else null
+                WhoopRecord.HapticsFired(timestamp, patternId)
+            }
+
+            WhoopConstants.EVENT_HAPTICS_TERMINATED -> {
+                val payloadOffset = base + WhoopConstants.EventHeader.PAYLOAD_START
+                val reasonCode = frame.getOrNull(payloadOffset)?.toInt()?.and(0xFF)
+                WhoopRecord.HapticsTerminated(timestamp, reasonCode)
             }
 
             WhoopConstants.EVENT_TEMP -> {
@@ -81,4 +111,7 @@ object EventDecoder {
 
     private fun ByteArray.getInt16LE(offset: Int): Short =
         (((this[offset + 1].toInt() and 0xFF) shl 8) or (this[offset].toInt() and 0xFF)).toShort()
+
+    private fun ByteArray.toHexString(): String =
+        joinToString(separator = " ") { byte -> "%02x".format(byte.toInt() and 0xFF) }
 }

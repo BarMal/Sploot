@@ -8,7 +8,7 @@ import java.time.Instant
  *
  * R10 inner-content layout (offsets from frame[4]):
  *   offset  0: frame sub-type (1 byte)
- *   offset  1: record type = 0x10 (1 byte)
+ *   offset  1: record type = 10 (R10, decimal) or 11 (R11 companion IMU)
  *   offset  2: sequence number (1 byte)
  *   offset  3..6: j_field (4 bytes, opaque)
  *   offset  7..10: ts_seconds  uint32 LE
@@ -24,12 +24,18 @@ import java.time.Instant
  */
 object R10Decoder {
 
-    /** Minimum frame size to contain all R10 fields. */
+    /**
+     * Minimum total frame size needed to read the final Gyro Z sample.
+     *
+     * WHOOP raw-realtime R10 packets observed on-device are smaller than the
+     * earlier hardcoded "inner size + header + crc" assumption, so gate on the
+     * highest offset we actually read instead of a nominal packet size.
+     */
     private const val MIN_FRAME_SIZE =
-        4 + WhoopConstants.R10.INNER_SIZE + 4  // header + inner + CRC32
+        4 + WhoopConstants.R10.OFFSET_GYRO_Z + (WhoopConstants.R10.SAMPLES * 2)
 
     /**
-     * Decode a complete R10 frame.
+     * Decode a complete R10/R11 IMU frame.
      * @param frame Full raw frame bytes (header + inner_content + CRC32).
      * @return [WhoopRecord.Imu] or null if the frame is malformed / too short.
      */
