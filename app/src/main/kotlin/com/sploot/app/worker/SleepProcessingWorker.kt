@@ -8,6 +8,7 @@ import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import com.sploot.data.entity.RawImuEntity
 import com.sploot.data.entity.RawPpgEntity
+import com.sploot.data.entity.HrSampleEntity
 import com.sploot.data.repository.AlgorithmRepository
 import com.sploot.data.repository.AlgorithmReviewRepository
 import com.sploot.data.repository.RecordingRepository
@@ -58,34 +59,75 @@ class SleepProcessingWorker @AssistedInject constructor(
 
     private suspend fun processSession(sessionId: Long) {
         val activeRevision = algorithmRepository.getOrCreateActiveRevision(MetricFamily.SLEEP)
-        val ppgRows = recordingRepo.getRawPpgForSession(sessionId)
-        val imuRows = recordingRepo.getRawImuForSession(sessionId)
+        val rawPpgRows = recordingRepo.getRawPpgForSession(sessionId)
+        val rawImuRows = recordingRepo.getRawImuForSession(sessionId)
+        val rawHrRows = recordingRepo.getHrSamplesForSession(sessionId)
 
-        if (ppgRows.size < MIN_PPG_ROWS || imuRows.size < MIN_IMU_ROWS) {
-            Timber.i("Session $sessionId too short to process (${ppgRows.size} PPG rows, ${imuRows.size} IMU rows)")
+        val sleepWindow = selectContiguousSleepWindow(
+            timestamps = rawImuRows.map { it.tsSeconds },
+        )
+        if (sleepWindow == null) {
+            Timber.i("Session $sessionId skipped: no plausible contiguous IMU-backed sleep window")
             return
         }
 
-        val sessionStartSec = ppgRows.first().tsSeconds - 1L
-        val sessionEndSec = ppgRows.last().tsSeconds
+        val ppgRows = rawPpgRows.filter { it.tsSeconds in sleepWindow.startSeconds until sleepWindow.endSeconds }
+        val imuRows = rawImuRows.filter { it.tsSeconds in sleepWindow.startSeconds until sleepWindow.endSeconds }
+        val hrRows = rawHrRows.filter { it.tsSeconds in sleepWindow.startSeconds until sleepWindow.endSeconds }
 
-        val ppgSamples = ppgRows.decodePpgChannelA()
-        val peakIndices = PpgPeakDetector.detect(ppgSamples, SAMPLE_RATE_HZ)
-        val ibiMs = IbiExtractor.extract(peakIndices, SAMPLE_RATE_HZ)
+        if (imuRows.size < MIN_IMU_ROWS || hrRows.size < MIN_HR_ROWS) {
+            Timber.i(
+                "Session $sessionId too sparse to process after IMU window filtering " +
+                    "(${ppgRows.size} PPG rows, ${imuRows.size} IMU rows, ${hrRows.size} HR rows)"
+            )
+            return
+        }
 
-        val hrvWindows = buildHrvWindows(sessionId, sessionStartSec, peakIndices, ibiMs)
+        val sessionStartSec = sleepWindow.startSeconds
+        val sessionEndSec = sleepWindow.endSeconds
+        val windowSeconds = (sessionEndSec - sessionStartSec).coerceAtLeast(1L)
+        val imuCoverage = imuRows.map { it.tsSeconds }.distinct().size.toFloat() / windowSeconds
+        val hrCoverage = hrRows.map { it.tsSeconds }.distinct().size.toFloat() / windowSeconds
 
+        if (imuCoverage < MIN_IMU_COVERAGE_RATIO || hrCoverage < MIN_HR_COVERAGE_RATIO) {
+            Timber.i(
+                "Session $sessionId skipped: insufficient signal coverage in sleep window " +
+                    "(imu=${"%.2f".format(imuCoverage)}, hr=${"%.2f".format(hrCoverage)}, " +
+                    "windowSeconds=$windowSeconds)"
+            )
+            return
+        }
+
+        val hrvWindows = if (ppgRows.size >= MIN_PPG_ROWS) {
+            val ppgSamples = ppgRows.decodePpgChannelA()
+            val peakIndices = PpgPeakDetector.detect(ppgSamples, SAMPLE_RATE_HZ)
+            val ibiMs = IbiExtractor.extract(peakIndices, SAMPLE_RATE_HZ)
+            buildHrvWindows(sessionId, sessionStartSec, peakIndices, ibiMs)
+        } else {
+            Timber.i(
+                "Session $sessionId has ${ppgRows.size} PPG rows; using HR/IMU-only sleep fallback"
+            )
+            emptyList()
+        }
+
+        val numEpochs = ((sessionEndSec - sessionStartSec) / EPOCH_SEC).toInt()
+        if (numEpochs < MIN_SLEEP_EPOCHS) {
+            Timber.i("Session $sessionId too short to process as sleep (${numEpochs * EPOCH_SEC / 60} min)")
+            return
+        }
         val (accelX, accelY, accelZ) = imuRows.decodeAccel()
-        val numEpochs = minOf(
-            accelX.size / (SAMPLE_RATE_HZ * EPOCH_SEC),
-            ((sessionEndSec - sessionStartSec) / EPOCH_SEC).toInt(),
+        val activityCounts = computeActivityCounts(
+            accelX = accelX,
+            accelY = accelY,
+            accelZ = accelZ,
+            numEpochs = minOf(numEpochs, accelX.size / (SAMPLE_RATE_HZ * EPOCH_SEC)),
         )
-        val activityCounts = computeActivityCounts(accelX, accelY, accelZ, numEpochs)
         val epochFeatures = buildEpochFeatures(
             sessionStartSec = sessionStartSec,
             numEpochs = numEpochs,
             hrvWindows = hrvWindows,
             imuRows = imuRows,
+            hrRows = hrRows,
             activityCounts = activityCounts,
         )
 
@@ -232,6 +274,7 @@ class SleepProcessingWorker @AssistedInject constructor(
         numEpochs: Int,
         hrvWindows: List<HrvWindow>,
         imuRows: List<RawImuEntity>,
+        hrRows: List<HrSampleEntity>,
         activityCounts: FloatArray,
     ): List<SleepStageClassifier.EpochFeatures> {
         return List(numEpochs) { epochIndex ->
@@ -252,10 +295,11 @@ class SleepProcessingWorker @AssistedInject constructor(
             }
 
             val epochImuRows = imuRows.filter { it.tsSeconds in epochStart until epochEnd }
-            val meanHr = if (epochImuRows.isNotEmpty()) {
-                epochImuRows.map { it.hrBpm }.average().toFloat()
-            } else {
-                matchedWindow?.let { if (it.meanRrMs > 0f) 60000f / it.meanRrMs else null } ?: 60f
+            val epochHrRows = hrRows.filter { it.tsSeconds in epochStart until epochEnd }
+            val meanHr = when {
+                epochImuRows.isNotEmpty() -> epochImuRows.map { it.hrBpm }.average().toFloat()
+                epochHrRows.isNotEmpty() -> epochHrRows.map { it.hrBpm }.average().toFloat()
+                else -> matchedWindow?.let { if (it.meanRrMs > 0f) 60000f / it.meanRrMs else null } ?: 60f
             }
 
             SleepStageClassifier.EpochFeatures(
@@ -289,6 +333,32 @@ class SleepProcessingWorker @AssistedInject constructor(
         return FloatArray(numEpochs) { epochIndex -> (rawCounts[epochIndex] / maxCount).toFloat() }
     }
 
+    private fun selectContiguousSleepWindow(timestamps: List<Long>): SleepCandidateWindow? {
+        val sorted = timestamps.distinct().sorted()
+        if (sorted.isEmpty()) return null
+
+        val windows = mutableListOf<SleepCandidateWindow>()
+        var start = sorted.first()
+        var previous = start
+        var count = 1
+
+        for (timestamp in sorted.drop(1)) {
+            if (timestamp - previous > MAX_SAMPLE_GAP_SECONDS) {
+                windows += SleepCandidateWindow(start, previous + 1L, count)
+                start = timestamp
+                count = 1
+            } else {
+                count += 1
+            }
+            previous = timestamp
+        }
+        windows += SleepCandidateWindow(start, previous + 1L, count)
+
+        return windows
+            .filter { it.durationSeconds in MIN_SLEEP_DURATION_SECONDS..MAX_SLEEP_DURATION_SECONDS }
+            .maxWithOrNull(compareBy<SleepCandidateWindow> { it.durationSeconds }.thenBy { it.sampleCount })
+    }
+
     private fun SleepStageClassifier.Stage.toDomainStage(): SleepStage = when (this) {
         SleepStageClassifier.Stage.DEEP -> SleepStage.DEEP
         SleepStageClassifier.Stage.LIGHT -> SleepStage.LIGHT
@@ -317,10 +387,25 @@ class SleepProcessingWorker @AssistedInject constructor(
         private const val MIN_IBI_PER_WINDOW = 5
         private const val MIN_PPG_ROWS = 60
         private const val MIN_IMU_ROWS = 60
+        private const val MIN_HR_ROWS = 60
+        private const val MIN_SLEEP_EPOCHS = 40
+        private const val MAX_SAMPLE_GAP_SECONDS = 2 * 60L
+        private const val MIN_IMU_COVERAGE_RATIO = 0.70f
+        private const val MIN_HR_COVERAGE_RATIO = 0.50f
+        private const val MIN_SLEEP_DURATION_SECONDS = 2 * 3600L
+        private const val MAX_SLEEP_DURATION_SECONDS = 14 * 3600L
 
         fun buildRequest(sessionId: Long) =
             OneTimeWorkRequestBuilder<SleepProcessingWorker>()
                 .setInputData(workDataOf(KEY_SESSION_ID to sessionId))
                 .build()
+    }
+
+    private data class SleepCandidateWindow(
+        val startSeconds: Long,
+        val endSeconds: Long,
+        val sampleCount: Int,
+    ) {
+        val durationSeconds: Long = endSeconds - startSeconds
     }
 }

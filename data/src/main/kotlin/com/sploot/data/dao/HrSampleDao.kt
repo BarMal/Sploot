@@ -23,6 +23,9 @@ interface HrSampleDao {
     @Query("SELECT COUNT(*) FROM hr_samples WHERE sessionId = :sessionId")
     suspend fun countForSession(sessionId: Long): Int
 
+    @Query("SELECT COUNT(*) FROM hr_samples WHERE tsSeconds = :tsSeconds")
+    suspend fun countAtTimestamp(tsSeconds: Long): Int
+
     @Query("SELECT MAX(tsSeconds) FROM hr_samples")
     suspend fun getLatestTimestamp(): Long?
 }

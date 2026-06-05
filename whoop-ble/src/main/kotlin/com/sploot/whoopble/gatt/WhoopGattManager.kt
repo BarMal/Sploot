@@ -18,6 +18,7 @@ import com.sploot.whoopble.protocol.EventDecoder
 import com.sploot.whoopble.protocol.FrameAssembler
 import com.sploot.whoopble.protocol.R10Decoder
 import com.sploot.whoopble.protocol.R11Decoder
+import com.sploot.whoopble.protocol.R12Decoder
 import com.sploot.whoopble.protocol.R21Decoder
 import com.sploot.whoopble.protocol.RealtimeHrSummaryDecoder
 import com.sploot.whoopble.protocol.WhoopConstants
@@ -117,6 +118,7 @@ class WhoopGattManager @Inject constructor(
     private var loggedR11FallbackIgnore = false
     private var loggedObservedR11Companion = false
     private var loggedObservedFirmwareLogs = false
+    private val recentProtocolContext = ArrayDeque<String>()
 
     // ── GATT callback ─────────────────────────────────────────────────────────
 
@@ -226,6 +228,7 @@ class WhoopGattManager @Inject constructor(
         this.sessionMode = sessionMode
         pendingLiveStreamConfig = streamConfig
         realtimeEnableIssued = false
+        recentProtocolContext.clear()
 
         connectionDeferred = CompletableDeferred()
         mtuDeferred        = CompletableDeferred()
@@ -301,6 +304,7 @@ class WhoopGattManager @Inject constructor(
         loggedR11FallbackIgnore = false
         loggedObservedR11Companion = false
         loggedObservedFirmwareLogs = false
+        recentProtocolContext.clear()
         _state.value = ConnectionState.DISCONNECTED
         dataAssembler.reset()
         eventAssembler.reset()
@@ -437,6 +441,7 @@ class WhoopGattManager @Inject constructor(
                             }
                             decoded
                         }
+                        WhoopConstants.RECORD_TYPE_R12 -> R12Decoder.decode(frame)
                         WhoopConstants.RECORD_TYPE_PPG -> R21Decoder.decode(frame)
                         else -> null
                     }
@@ -446,8 +451,25 @@ class WhoopGattManager @Inject constructor(
             }
 
             record?.let { _records.tryEmit(it) }
-            if (record == null && packetType == 0x30) {
-                auditUnknownEvent(frame)
+            if (
+                sessionMode == WhoopSessionMode.HISTORICAL_SYNC &&
+                !historicalSyncDeferred.isCompleted &&
+                (packetType == 0x28 || packetType == 0x2B)
+            ) {
+                traceInternal("metadata", "Historical sync implicitly complete after realtime frame")
+                historicalSyncDeferred.complete(Unit)
+                _state.value = ConnectionState.READY
+            }
+            if (packetType == 0x30) {
+                if (record == null) {
+                    val eventType = eventType(frame)
+                    if (observedUndecodedEventTypeName(eventType) != null) {
+                        auditObservedUndecodedEvent(frame)
+                    } else if (decodedEventTypeName(eventType) == null) {
+                        auditUnknownEvent(frame)
+                    }
+                }
+                appendProtocolContext(eventContextSummary(frame))
             } else if (record == null && (packetType == 0x28 || packetType == 0x2B || packetType == 0x2F)) {
                 val recordType = frame.getOrNull(5)?.toInt()?.and(0xFF)
                 if (recordType == WhoopConstants.RECORD_TYPE_COMPANION_IMU) {
@@ -493,20 +515,26 @@ class WhoopGattManager @Inject constructor(
             frame[3] == 0xAB.toByte() &&
             frame[4] == 0x31.toByte()
         ) {
-            val batchId = frame.copyOfRange(17, 25)
-            traceInternal("metadata", "Historical batch marker received")
-            serviceScopeLaunchBatchAck(batchId)
+            val batchNumber = frame.copyOfRange(17, 21)
+            traceInternal(
+                "metadata",
+                "Historical batch marker received batch=${frame.getUInt32LE(17)}",
+            )
+            appendProtocolContext("metadata:historical-batch batch=${frame.getUInt32LE(17)}")
+            serviceScopeLaunchBatchAck(batchNumber)
             return true
         }
 
         if (frame[4] == 0x31.toByte()) {
             if (sessionMode == WhoopSessionMode.HISTORICAL_SYNC && !historicalSyncDeferred.isCompleted) {
                 traceInternal("metadata", "Historical sync complete marker received")
+                appendProtocolContext("metadata:historical-complete size=${frame.size}")
                 historicalSyncDeferred.complete(Unit)
                 _state.value = ConnectionState.READY
                 Timber.i("Whoop historical sync complete")
             } else if (sessionMode == WhoopSessionMode.LIVE_RECORDING && !realtimeEnableIssued) {
                 traceInternal("metadata", "Live end-of-sync marker received, enabling realtime streams")
+                appendProtocolContext("metadata:live-sync-boundary size=${frame.size}")
                 realtimeEnableIssued = true
                 managerScope.launch {
                     runCatching {
@@ -532,13 +560,13 @@ class WhoopGattManager @Inject constructor(
         return false
     }
 
-    private fun serviceScopeLaunchBatchAck(batchId: ByteArray) {
+    private fun serviceScopeLaunchBatchAck(batchNumber: ByteArray) {
         managerScope.launch {
             runCatching {
                 val localGatt = gatt ?: return@launch
                 val cmdChar = localGatt.findCharacteristic(WhoopConstants.CMD_TO_STRAP_PREFIX)
                     ?: return@launch
-                writeGatt(cmdChar, buildBatchAckPacket(batchCounter++, batchId))
+                writeGatt(cmdChar, buildBatchAckPacket(batchCounter++, batchNumber))
             }.onFailure {
                 Timber.w(it, "Failed to ACK historical batch marker")
             }
@@ -575,6 +603,7 @@ class WhoopGattManager @Inject constructor(
                 summary = "Write ${commandSummary(value)}",
                 bytes = value,
             )
+            appendProtocolContext("out:${commandSummary(value)}")
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 gatt!!.writeCharacteristic(
@@ -691,6 +720,20 @@ class WhoopGattManager @Inject constructor(
         )
     }
 
+    private fun appendProtocolContext(summary: String) {
+        while (recentProtocolContext.size >= RECENT_PROTOCOL_CONTEXT_LIMIT) {
+            recentProtocolContext.removeFirst()
+        }
+        recentProtocolContext.addLast(summary.take(MAX_PROTOCOL_CONTEXT_ENTRY_CHARS))
+    }
+
+    private fun precedingProtocolContextNote(): String =
+        if (recentProtocolContext.isEmpty()) {
+            "Preceding context: none"
+        } else {
+            "Preceding context: ${recentProtocolContext.joinToString(separator = " | ")}"
+        }
+
     private fun emitTrace(event: WhoopBleTraceEvent) {
         _traceEvents.tryEmit(event)
         Timber.tag("WhoopTrace").d(
@@ -711,6 +754,7 @@ class WhoopGattManager @Inject constructor(
             channel = "cmd",
             summary = "CMD_RESPONSE ${commandName(cmd)} payload=${payload.hexPreview(12)}",
         )
+        appendProtocolContext("cmd-response:${commandName(cmd)} payload=${payload.hexPreview(12)}")
     }
 
     private fun decodeCommandResponseRecord(frame: ByteArray): WhoopRecord? {
@@ -766,20 +810,12 @@ class WhoopGattManager @Inject constructor(
     private fun traceEvent(frame: ByteArray) {
         if (frame.size < 8 || frame.getOrNull(4)?.toInt()?.and(0xFF) != 0x30) return
         val eventType = eventType(frame) ?: return
-        val summary = when (eventType) {
-            WhoopConstants.EVENT_DOUBLE_TAP -> "EVENT DOUBLE_TAP"
-            WhoopConstants.EVENT_BLE_REALTIME_HR_ON -> "EVENT BLE_REALTIME_HR_ON"
-            WhoopConstants.EVENT_BLE_REALTIME_HR_OFF -> "EVENT BLE_REALTIME_HR_OFF"
-            WhoopConstants.EVENT_SET_RTC -> "EVENT SET_RTC"
-            WhoopConstants.EVENT_CAPTOUCH_AUTOTHRESHOLD_ACTION -> "EVENT CAPTOUCH_AUTOTHRESHOLD_ACTION"
-            WhoopConstants.EVENT_BLE_SYSTEM_INITIALIZED -> "EVENT BLE_SYSTEM_INITIALIZED"
-            WhoopConstants.EVENT_HAPTICS_FIRED -> "EVENT HAPTICS_FIRED"
-            WhoopConstants.EVENT_HAPTICS_TERMINATED -> "EVENT HAPTICS_TERMINATED"
-            else -> {
+        val summary = decodedEventTypeName(eventType)?.let { "EVENT $it" }
+            ?: observedUndecodedEventTypeName(eventType)?.let { "EVENT $it (observed undecoded)" }
+            ?: run {
                 traceInternal(channel = "event", summary = "Unknown WHOOP event type=$eventType size=${frame.size}")
                 return
             }
-        }
         traceInternal(channel = "event", summary = summary)
     }
 
@@ -793,7 +829,24 @@ class WhoopGattManager @Inject constructor(
             identifierLabel = eventType?.let { "eventType=$it" } ?: "eventType=unknown",
             frameSizeBytes = frame.size,
             hexPreview = frame.hexPreview(40),
-            note = "Unknown WHOOP event emitted by strap",
+            note = "Unknown WHOOP event emitted by strap. ${precedingProtocolContextNote()}",
+        )
+        _unknownObservations.tryEmit(observation)
+    }
+
+    private fun auditObservedUndecodedEvent(frame: ByteArray) {
+        val eventType = eventType(frame)
+        val observation = WhoopUnknownObservation(
+            category = UnknownObservationCategory.OBSERVED_UNDECODED_EVENT,
+            packetType = frame.getOrNull(4)?.toInt()?.and(0xFF),
+            packetTypeName = packetTypeName(frame),
+            identifier = eventType,
+            identifierLabel = eventType?.let {
+                "eventType=$it (${observedUndecodedEventTypeName(it)})"
+            } ?: "eventType=unknown",
+            frameSizeBytes = frame.size,
+            hexPreview = frame.hexPreview(40),
+            note = "Observed recurring WHOOP event with undecoded semantics. ${precedingProtocolContextNote()}",
         )
         _unknownObservations.tryEmit(observation)
     }
@@ -808,7 +861,7 @@ class WhoopGattManager @Inject constructor(
             identifierLabel = recordTypeLabel(frame),
             frameSizeBytes = frame.size,
             hexPreview = frame.hexPreview(40),
-            note = "Undecoded WHOOP data frame",
+            note = "Undecoded WHOOP data frame. ${precedingProtocolContextNote()}",
         )
         _unknownObservations.tryEmit(observation)
     }
@@ -906,12 +959,59 @@ class WhoopGattManager @Inject constructor(
             recordType == WhoopConstants.RECORD_TYPE_R20 ||
             recordType == WhoopConstants.RECORD_TYPE_R24
 
+    private fun decodedEventTypeName(eventType: Int?): String? =
+        when (eventType) {
+            WhoopConstants.EVENT_BATTERY -> "BATTERY"
+            WhoopConstants.EVENT_WRIST_ON -> "WRIST_ON"
+            WhoopConstants.EVENT_WRIST_OFF -> "WRIST_OFF"
+            WhoopConstants.EVENT_DOUBLE_TAP -> "DOUBLE_TAP"
+            WhoopConstants.EVENT_SET_RTC -> "SET_RTC"
+            WhoopConstants.EVENT_TEMP -> "TEMP"
+            WhoopConstants.EVENT_CAPTOUCH_AUTOTHRESHOLD_ACTION -> "CAPTOUCH_AUTOTHRESHOLD_ACTION"
+            WhoopConstants.EVENT_BLE_REALTIME_HR_ON -> "BLE_REALTIME_HR_ON"
+            WhoopConstants.EVENT_BLE_REALTIME_HR_OFF -> "BLE_REALTIME_HR_OFF"
+            WhoopConstants.EVENT_BLE_SYSTEM_INITIALIZED -> "BLE_SYSTEM_INITIALIZED"
+            WhoopConstants.EVENT_HAPTICS_FIRED -> "HAPTICS_FIRED"
+            WhoopConstants.EVENT_EXTENDED_BATTERY_INFORMATION -> "EXTENDED_BATTERY_INFORMATION"
+            WhoopConstants.EVENT_HAPTICS_TERMINATED -> "HAPTICS_TERMINATED"
+            else -> null
+        }
+
+    private fun observedUndecodedEventTypeName(eventType: Int?): String? =
+        when (eventType) {
+            WhoopConstants.EVENT_UNDECODED_1 -> "UNDECODED_1"
+            WhoopConstants.EVENT_UNDECODED_7 -> "UNDECODED_7"
+            WhoopConstants.EVENT_UNDECODED_11 -> "UNDECODED_11"
+            WhoopConstants.EVENT_UNDECODED_12 -> "UNDECODED_12"
+            WhoopConstants.EVENT_UNDECODED_21 -> "UNDECODED_21"
+            WhoopConstants.EVENT_UNDECODED_24 -> "UNDECODED_24"
+            WhoopConstants.EVENT_UNDECODED_29 -> "UNDECODED_29"
+            WhoopConstants.EVENT_UNDECODED_36 -> "UNDECODED_36"
+            WhoopConstants.EVENT_UNDECODED_44 -> "UNDECODED_44"
+            else -> null
+        }
+
     private fun eventType(frame: ByteArray): Int? =
         if (frame.size >= 8 && frame.getOrNull(4)?.toInt()?.and(0xFF) == 0x30) {
             ((frame[7].toInt() and 0xFF) shl 8) or (frame[6].toInt() and 0xFF)
         } else {
             null
         }
+
+    private fun eventContextSummary(frame: ByteArray): String {
+        val type = eventType(frame)
+        val name = decodedEventTypeName(type) ?: observedUndecodedEventTypeName(type) ?: "UNKNOWN"
+        val tsSeconds = if (frame.size >= 12) frame.getUInt32LE(8) else null
+        val subsecond = if (frame.size >= 14) {
+            (frame[12].toInt() and 0xFF) or ((frame[13].toInt() and 0xFF) shl 8)
+        } else {
+            null
+        }
+        val payloadOffset = 4 + WhoopConstants.EventHeader.PAYLOAD_START
+        val payloadEnd = frame.size - 4
+        val payload = if (payloadEnd > payloadOffset) frame.copyOfRange(payloadOffset, payloadEnd) else byteArrayOf()
+        return "event:type=$type/$name ts=$tsSeconds sub=$subsecond size=${frame.size} payload=${payload.hexPreview(12)}"
+    }
 
     private fun ByteArray.hexPreview(maxBytes: Int = 24): String =
         take(maxBytes).joinToString(separator = " ") { byte -> "%02x".format(byte.toInt() and 0xFF) }
@@ -934,13 +1034,13 @@ class WhoopGattManager @Inject constructor(
 
     private fun Int.toHexByte(): String = "%02x".format(this and 0xFF)
 
-    private fun buildBatchAckPacket(counter: Int, batchId: ByteArray): ByteArray {
+    private fun buildBatchAckPacket(counter: Int, batchNumber: ByteArray): ByteArray {
         val inner = byteArrayOf(
             WhoopConstants.CMD_TYPE_COMMAND.toByte(),
             counter.toByte(),
             0x17,
             0x01,
-        ) + batchId
+        ) + batchNumber.copyOf(4) + byteArrayOf(0x00, 0x00, 0x00, 0x00)
 
         val frameLength = inner.size + 4
         val lenLo  = (frameLength and 0xFF).toByte()
@@ -997,5 +1097,7 @@ class WhoopGattManager @Inject constructor(
 
     companion object {
         private const val DEFAULT_HARVARD_HAPTIC_PATTERN_ID = 2
+        private const val RECENT_PROTOCOL_CONTEXT_LIMIT = 8
+        private const val MAX_PROTOCOL_CONTEXT_ENTRY_CHARS = 180
     }
 }

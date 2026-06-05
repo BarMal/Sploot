@@ -16,5 +16,6 @@ data class WhoopUnknownObservation(
 
 enum class UnknownObservationCategory {
     EVENT,
+    OBSERVED_UNDECODED_EVENT,
     DATA_FRAME,
 }

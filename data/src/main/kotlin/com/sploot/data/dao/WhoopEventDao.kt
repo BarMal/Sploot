@@ -20,6 +20,9 @@ interface WhoopEventDao {
     @Query("SELECT COUNT(*) FROM whoop_events WHERE sessionId = :sessionId")
     suspend fun countForSession(sessionId: Long): Int
 
+    @Query("SELECT COUNT(*) FROM whoop_events WHERE tsSeconds = :tsSeconds AND eventType = :eventType")
+    suspend fun countAtTimestamp(tsSeconds: Long, eventType: String): Int
+
     @Query("SELECT MAX(tsSeconds) FROM whoop_events")
     suspend fun getLatestTimestamp(): Long?
 }

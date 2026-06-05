@@ -20,6 +20,9 @@ interface RawPpgDao {
     @Query("SELECT COUNT(*) FROM raw_ppg WHERE sessionId = :sessionId")
     suspend fun countForSession(sessionId: Long): Int
 
+    @Query("SELECT COUNT(*) FROM raw_ppg WHERE tsSeconds = :tsSeconds")
+    suspend fun countAtTimestamp(tsSeconds: Long): Int
+
     @Query("SELECT MAX(tsSeconds) FROM raw_ppg")
     suspend fun getLatestTimestamp(): Long?
 }

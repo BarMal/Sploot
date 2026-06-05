@@ -59,15 +59,24 @@ object WhoopConstants {
 
     // ── Event type values (uint16 at inner content offset 2 in EVENT frames) ─
 
+    const val EVENT_UNDECODED_1: Int = 1
     const val EVENT_BATTERY:   Int = 3
+    const val EVENT_UNDECODED_7: Int = 7
     const val EVENT_WRIST_ON:  Int = 9
     const val EVENT_WRIST_OFF: Int = 10
+    const val EVENT_UNDECODED_11: Int = 11
+    const val EVENT_UNDECODED_12: Int = 12
     const val EVENT_DOUBLE_TAP: Int = 14
     const val EVENT_SET_RTC: Int = 16
     const val EVENT_TEMP:      Int = 17
+    const val EVENT_UNDECODED_21: Int = 21
+    const val EVENT_UNDECODED_24: Int = 24
+    const val EVENT_UNDECODED_29: Int = 29
     const val EVENT_CAPTOUCH_AUTOTHRESHOLD_ACTION: Int = 32
     const val EVENT_BLE_REALTIME_HR_ON: Int = 33
     const val EVENT_BLE_REALTIME_HR_OFF: Int = 34
+    const val EVENT_UNDECODED_36: Int = 36
+    const val EVENT_UNDECODED_44: Int = 44
     const val EVENT_BLE_SYSTEM_INITIALIZED: Int = 45
     const val EVENT_HAPTICS_FIRED: Int = 60
     const val EVENT_EXTENDED_BATTERY_INFORMATION: Int = 63
