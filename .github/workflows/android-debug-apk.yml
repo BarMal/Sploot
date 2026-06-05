@@ -1,0 +1,92 @@
+name: Android Debug APK
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build debug APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Make Gradle wrapper executable
+        run: chmod +x ./gradlew
+
+      - name: Build debug APK
+        run: ./gradlew :app:assembleDebug --stacktrace
+
+      - name: Prepare debug APK
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          APK_PATH="$(find app/build/outputs/apk/debug -name '*.apk' | head -n 1)"
+          cp "$APK_PATH" dist/Sploot-debug.apk
+
+      - name: Upload debug APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Sploot-debug-apk
+          path: dist/Sploot-debug.apk
+          if-no-files-found: error
+
+      - name: Generate release notes
+        if: github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+          {
+            echo "Debug build for commit \`${GITHUB_SHA}\`."
+            echo
+            echo "Built from branch \`${GITHUB_REF_NAME}\`."
+            echo
+            echo "### Recent changes"
+            git log -10 --pretty=format:'- %s (%h)'
+            echo
+          } > dist/release-notes.md
+
+      - name: Publish latest debug release
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git tag -f debug-latest "$GITHUB_SHA"
+          git push -f origin debug-latest
+
+          if gh release view debug-latest >/dev/null 2>&1; then
+            gh release upload debug-latest dist/Sploot-debug.apk --clobber
+            gh release edit debug-latest \
+              --title "Latest debug APK" \
+              --notes-file dist/release-notes.md \
+              --prerelease
+          else
+            gh release create debug-latest dist/Sploot-debug.apk \
+              --title "Latest debug APK" \
+              --notes-file dist/release-notes.md \
+              --prerelease \
+              --target "$GITHUB_SHA"
+          fi
