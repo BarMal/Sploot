@@ -118,6 +118,17 @@ fun DebugScreen(
                 }
             }
 
+            Spacer(Modifier.height(10.dp))
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(24.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                MetricLabel(label = "Live frames", value = "${state.realtimeFrameCount}")
+                MetricLabel(label = "History frames", value = "${state.historicalFrameCount}")
+                MetricLabel(label = "History batches", value = "${state.historicalBatchMarkers}")
+                MetricLabel(label = "History done", value = "${state.historicalCompleteMarkers}")
+            }
+
             Spacer(Modifier.height(8.dp))
             Text(
                 text = "Double-tap action: ${state.configuredDoubleTapAction}",
@@ -168,6 +179,12 @@ fun DebugScreen(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
+                OutlinedButton(
+                    onClick = vm::startHistoricalBackfill,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("Backfill Now")
+                }
                 FilledTonalButton(
                     onClick = vm::toggleHaptics,
                     modifier = Modifier.weight(1f),

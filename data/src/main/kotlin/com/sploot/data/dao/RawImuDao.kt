@@ -21,6 +21,9 @@ interface RawImuDao {
     @Query("SELECT COUNT(*) FROM raw_imu WHERE sessionId = :sessionId")
     suspend fun countForSession(sessionId: Long): Int
 
+    @Query("SELECT COUNT(*) FROM raw_imu WHERE tsSeconds = :tsSeconds")
+    suspend fun countAtTimestamp(tsSeconds: Long): Int
+
     @Query("SELECT MAX(tsSeconds) FROM raw_imu")
     suspend fun getLatestTimestamp(): Long?
 }

@@ -33,6 +33,7 @@ import com.sploot.whoopble.gatt.ConnectionState
 import com.sploot.whoopble.gatt.WhoopSessionMode
 import com.sploot.whoopble.gatt.WhoopStreamConfig
 import com.sploot.whoopble.gatt.WhoopGattManager
+import com.sploot.whoopble.model.UnknownObservationCategory
 import com.sploot.whoopble.model.WhoopUnknownObservation
 import com.sploot.whoopble.model.WhoopRecord
 import com.sploot.whoopble.protocol.WhoopConstants
@@ -44,6 +45,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
 import timber.log.Timber
@@ -76,6 +78,11 @@ class WhoopRecordingService : Service() {
     private var lastPersistedPpgSecond: Long? = null
     private var lastPersistedHrSecond: Long? = null
     private var batterySaverActive = false
+    private var historicalImuPersisted = 0
+    private var historicalPpgPersisted = 0
+    private var historicalHrPersisted = 0
+    private var historicalEventPersisted = 0
+    private var historicalSkippedByCutoff = 0
     private var currentMode = WhoopSessionMode.LIVE_RECORDING
     private var startupMode: WhoopSessionMode? = null
     private var syncCutoffSeconds: Long? = null
@@ -126,6 +133,7 @@ class WhoopRecordingService : Service() {
     }
 
     override fun onDestroy() {
+        closeCurrentSessionIfNeeded(reason = "service destroyed")
         serviceScope.cancel()
         unregisterReceiver(powerSaveReceiver)
         gattManager.disconnect()
@@ -155,7 +163,7 @@ class WhoopRecordingService : Service() {
     private fun handleStartHistoricalSync(autoStartLiveAfter: Boolean) {
         if (startupMode == WhoopSessionMode.HISTORICAL_SYNC) return
         whoopSyncCoordinator.markSyncStarted()
-        val shouldResumeLiveAfterSync = autoStartLiveAfter || currentMode == WhoopSessionMode.LIVE_RECORDING
+        val shouldResumeLiveAfterSync = autoStartLiveAfter
         if (currentSessionId >= 0L) {
             if (currentMode == WhoopSessionMode.HISTORICAL_SYNC) return
             pendingHistoricalSyncAfterStop = true
@@ -202,6 +210,7 @@ class WhoopRecordingService : Service() {
         currentMode = WhoopSessionMode.HISTORICAL_SYNC
         startupMode = WhoopSessionMode.HISTORICAL_SYNC
         syncCutoffSeconds = null
+        resetHistoricalCounters()
         pendingLiveRestartAfterStop = autoStartLiveAfter
         whoopRuntimeCoordinator.setState(WhoopRuntimeState.STARTING_HISTORY)
         startForeground(NOTIF_ID, buildNotification("Syncing WHOOP history…"))
@@ -266,11 +275,12 @@ class WhoopRecordingService : Service() {
                     enqueueProcessingWorkers(sessionId)
                 }
             }
-            currentSessionId = -1L
-            syncCutoffSeconds = null
             if (wasHistoricalSync) {
+                logHistoricalSummary(sessionId = currentSessionId)
                 whoopSyncCoordinator.markSyncFinished()
             }
+            currentSessionId = -1L
+            syncCutoffSeconds = null
             when {
                 restartHistorical -> {
                     whoopRuntimeCoordinator.setState(WhoopRuntimeState.SWITCHING_TO_HISTORY)
@@ -379,7 +389,7 @@ class WhoopRecordingService : Service() {
                 is WhoopRecord.Imu -> {
                     if (!settings.enableWhoopImuStream) return@collect
                     val tsSeconds = record.timestamp.epochSecond
-                    if (shouldSkipHistoricalRecord(tsSeconds)) return@collect
+                    if (shouldSkipExistingHistoricalImu(tsSeconds)) return@collect
                     if (shouldPersist(tsSeconds, lastPersistedImuSecond, settings.effectiveImuIntervalSeconds())) {
                         recordingRepo.insertImu(
                             sessionId = currentSessionId,
@@ -394,6 +404,10 @@ class WhoopRecordingService : Service() {
                         )
                         lastPersistedImuSecond = tsSeconds
                         lastPersistedHrSecond = tsSeconds
+                        if (currentMode == WhoopSessionMode.HISTORICAL_SYNC) {
+                            historicalImuPersisted++
+                            historicalHrPersisted++
+                        }
                     } else if (
                         settings.enableWhoopHrStream &&
                         shouldPersist(tsSeconds, lastPersistedHrSecond, settings.effectiveHrIntervalSeconds())
@@ -404,13 +418,16 @@ class WhoopRecordingService : Service() {
                             hrBpm = record.hrBpm,
                         )
                         lastPersistedHrSecond = tsSeconds
+                        if (currentMode == WhoopSessionMode.HISTORICAL_SYNC) {
+                            historicalHrPersisted++
+                        }
                     }
                 }
 
                 is WhoopRecord.Ppg -> {
                     if (!settings.enableWhoopPpgStream) return@collect
                     val tsSeconds = record.timestamp.epochSecond
-                    if (shouldSkipHistoricalRecord(tsSeconds)) return@collect
+                    if (shouldSkipExistingHistoricalPpg(tsSeconds)) return@collect
                     if (shouldPersist(tsSeconds, lastPersistedPpgSecond, settings.effectivePpgIntervalSeconds())) {
                         recordingRepo.insertPpg(
                             sessionId = currentSessionId,
@@ -424,13 +441,16 @@ class WhoopRecordingService : Service() {
                             channelF  = record.channelF.toUInt16Bytes(),
                         )
                         lastPersistedPpgSecond = tsSeconds
+                        if (currentMode == WhoopSessionMode.HISTORICAL_SYNC) {
+                            historicalPpgPersisted++
+                        }
                     }
                 }
 
                 is WhoopRecord.HeartRate -> {
                     if (!settings.enableWhoopHrStream) return@collect
                     val tsSeconds = record.timestamp.epochSecond
-                    if (shouldSkipHistoricalRecord(tsSeconds)) return@collect
+                    if (shouldSkipExistingHistoricalHr(tsSeconds)) return@collect
                     if (shouldPersist(tsSeconds, lastPersistedHrSecond, settings.effectiveHrIntervalSeconds())) {
                         recordingRepo.insertHrSample(
                             sessionId = currentSessionId,
@@ -438,85 +458,96 @@ class WhoopRecordingService : Service() {
                             hrBpm = record.hrBpm,
                         )
                         lastPersistedHrSecond = tsSeconds
+                        if (currentMode == WhoopSessionMode.HISTORICAL_SYNC) {
+                            historicalHrPersisted++
+                        }
                     }
                 }
 
                 is WhoopRecord.Battery ->
                     if (settings.captureWhoopEvents) {
                         val tsSeconds = record.timestamp.epochSecond
-                        if (!shouldSkipHistoricalRecord(tsSeconds)) {
+                        if (!shouldSkipExistingHistoricalEvent(tsSeconds, "BATTERY")) {
                             recordingRepo.insertEvent(currentSessionId, tsSeconds, "BATTERY", record.percent)
+                            if (currentMode == WhoopSessionMode.HISTORICAL_SYNC) historicalEventPersisted++
                         }
                     }
 
                 is WhoopRecord.Temperature ->
                     if (settings.captureWhoopEvents) {
                         val tsSeconds = record.timestamp.epochSecond
-                        if (!shouldSkipHistoricalRecord(tsSeconds)) {
+                        if (!shouldSkipExistingHistoricalEvent(tsSeconds, "TEMP")) {
                             recordingRepo.insertEvent(currentSessionId, tsSeconds, "TEMP", record.celsius)
+                            if (currentMode == WhoopSessionMode.HISTORICAL_SYNC) historicalEventPersisted++
                         }
                     }
 
                 is WhoopRecord.WristOn ->
                     if (settings.captureWhoopEvents) {
                         val tsSeconds = record.timestamp.epochSecond
-                        if (!shouldSkipHistoricalRecord(tsSeconds)) {
+                        if (!shouldSkipExistingHistoricalEvent(tsSeconds, "WRIST_ON")) {
                             recordingRepo.insertEvent(currentSessionId, tsSeconds, "WRIST_ON", null)
+                            if (currentMode == WhoopSessionMode.HISTORICAL_SYNC) historicalEventPersisted++
                         }
                     }
 
                 is WhoopRecord.WristOff ->
                     if (settings.captureWhoopEvents) {
                         val tsSeconds = record.timestamp.epochSecond
-                        if (!shouldSkipHistoricalRecord(tsSeconds)) {
+                        if (!shouldSkipExistingHistoricalEvent(tsSeconds, "WRIST_OFF")) {
                             recordingRepo.insertEvent(currentSessionId, tsSeconds, "WRIST_OFF", null)
+                            if (currentMode == WhoopSessionMode.HISTORICAL_SYNC) historicalEventPersisted++
                         }
                     }
 
                 is WhoopRecord.DoubleTap ->
                     if (settings.captureWhoopEvents) {
                         val tsSeconds = record.timestamp.epochSecond
-                        if (!shouldSkipHistoricalRecord(tsSeconds)) {
+                        if (!shouldSkipExistingHistoricalEvent(tsSeconds, "DOUBLE_TAP")) {
                             recordingRepo.insertEvent(currentSessionId, tsSeconds, "DOUBLE_TAP", null)
+                            if (currentMode == WhoopSessionMode.HISTORICAL_SYNC) historicalEventPersisted++
                         }
                     }
 
                 is WhoopRecord.CapTouchAutoThreshold ->
                     if (settings.captureWhoopEvents) {
                         val tsSeconds = record.timestamp.epochSecond
-                        if (!shouldSkipHistoricalRecord(tsSeconds)) {
+                        if (!shouldSkipExistingHistoricalEvent(tsSeconds, "CAPTOUCH_AUTOTHRESHOLD_ACTION")) {
                             recordingRepo.insertEvent(
                                 currentSessionId,
                                 tsSeconds,
                                 "CAPTOUCH_AUTOTHRESHOLD_ACTION",
                                 null,
                             )
+                            if (currentMode == WhoopSessionMode.HISTORICAL_SYNC) historicalEventPersisted++
                         }
                     }
 
                 is WhoopRecord.HapticsFired ->
                     if (settings.captureWhoopEvents) {
                         val tsSeconds = record.timestamp.epochSecond
-                        if (!shouldSkipHistoricalRecord(tsSeconds)) {
+                        if (!shouldSkipExistingHistoricalEvent(tsSeconds, "HAPTICS_FIRED")) {
                             recordingRepo.insertEvent(
                                 currentSessionId,
                                 tsSeconds,
                                 "HAPTICS_FIRED",
                                 record.patternId?.toFloat(),
                             )
+                            if (currentMode == WhoopSessionMode.HISTORICAL_SYNC) historicalEventPersisted++
                         }
                     }
 
                 is WhoopRecord.HapticsTerminated ->
                     if (settings.captureWhoopEvents) {
                         val tsSeconds = record.timestamp.epochSecond
-                        if (!shouldSkipHistoricalRecord(tsSeconds)) {
+                        if (!shouldSkipExistingHistoricalEvent(tsSeconds, "HAPTICS_TERMINATED")) {
                             recordingRepo.insertEvent(
                                 currentSessionId,
                                 tsSeconds,
                                 "HAPTICS_TERMINATED",
                                 record.reasonCode?.toFloat(),
                             )
+                            if (currentMode == WhoopSessionMode.HISTORICAL_SYNC) historicalEventPersisted++
                         }
                     }
             }
@@ -547,6 +578,7 @@ class WhoopRecordingService : Service() {
     ) {
         val settings = settingsRepository.current()
         if (!settings.enableWhoopUnknownTagPrompts) return
+        if (observation.category == UnknownObservationCategory.OBSERVED_UNDECODED_EVENT) return
         if (!result.isNewSignature) return
         if (result.entity.userAnnotation != null) return
         if (!canPostUnknownTagPrompt()) return
@@ -639,10 +671,68 @@ class WhoopRecordingService : Service() {
         intervalSeconds: Int,
     ): Boolean = lastPersistedSecond == null || (tsSeconds - lastPersistedSecond) >= intervalSeconds
 
-    private fun shouldSkipHistoricalRecord(tsSeconds: Long): Boolean =
+    private suspend fun shouldSkipExistingHistoricalImu(tsSeconds: Long): Boolean =
         currentMode == WhoopSessionMode.HISTORICAL_SYNC &&
-            syncCutoffSeconds != null &&
-            tsSeconds <= syncCutoffSeconds!!
+            recordingRepo.hasImuAtTimestamp(tsSeconds).also { exists ->
+                if (exists) historicalSkippedByCutoff++
+            }
+
+    private suspend fun shouldSkipExistingHistoricalPpg(tsSeconds: Long): Boolean =
+        currentMode == WhoopSessionMode.HISTORICAL_SYNC &&
+            recordingRepo.hasPpgAtTimestamp(tsSeconds).also { exists ->
+                if (exists) historicalSkippedByCutoff++
+            }
+
+    private suspend fun shouldSkipExistingHistoricalHr(tsSeconds: Long): Boolean =
+        currentMode == WhoopSessionMode.HISTORICAL_SYNC &&
+            recordingRepo.hasHrAtTimestamp(tsSeconds).also { exists ->
+                if (exists) historicalSkippedByCutoff++
+            }
+
+    private suspend fun shouldSkipExistingHistoricalEvent(tsSeconds: Long, eventType: String): Boolean =
+        currentMode == WhoopSessionMode.HISTORICAL_SYNC &&
+            recordingRepo.hasEventAtTimestamp(tsSeconds, eventType).also { exists ->
+                if (exists) historicalSkippedByCutoff++
+            }
+
+    private fun resetHistoricalCounters() {
+        historicalImuPersisted = 0
+        historicalPpgPersisted = 0
+        historicalHrPersisted = 0
+        historicalEventPersisted = 0
+        historicalSkippedByCutoff = 0
+    }
+
+    private fun logHistoricalSummary(sessionId: Long) {
+        Timber.i(
+            "WHOOP historical sync summary session=$sessionId cutoff=$syncCutoffSeconds " +
+                "imu=$historicalImuPersisted ppg=$historicalPpgPersisted " +
+                "hr=$historicalHrPersisted events=$historicalEventPersisted " +
+                "skippedExisting=$historicalSkippedByCutoff"
+        )
+    }
+
+    private fun closeCurrentSessionIfNeeded(reason: String) {
+        val sessionId = currentSessionId
+        if (sessionId < 0L) return
+        runBlocking {
+            recordCollectorJob?.cancel()
+            unknownCollectorJob?.cancel()
+            runCatching { gattManager.disableActiveStreams() }
+                .onFailure { Timber.w(it, "Failed to disable WHOOP streams during $reason") }
+            recordingRepo.endSession(sessionId)
+            val hasAnyData = recordingRepo.sessionHasAnyData(sessionId)
+            if (!hasAnyData) {
+                recordingRepo.deleteSession(sessionId)
+                Timber.i("Dropped empty WHOOP session $sessionId during $reason")
+            } else {
+                Timber.i("Closed WHOOP session $sessionId during $reason")
+                enqueueProcessingWorkers(sessionId)
+            }
+        }
+        currentSessionId = -1L
+        syncCutoffSeconds = null
+    }
 
     private suspend fun applyBatterySaverProfileIfRecording() {
         if (currentSessionId < 0L || gattManager.state.value == ConnectionState.DISCONNECTED) return

@@ -157,6 +157,21 @@ class RecordingRepository @Inject constructor(
         hrDao.insert(HrSampleEntity(sessionId, tsSeconds, hrBpm))
     }
 
+    suspend fun hasImuAtTimestamp(tsSeconds: Long): Boolean =
+        imuDao.countAtTimestamp(tsSeconds) > 0
+
+    suspend fun hasPpgAtTimestamp(tsSeconds: Long): Boolean =
+        ppgDao.countAtTimestamp(tsSeconds) > 0
+
+    suspend fun hasHrAtTimestamp(tsSeconds: Long): Boolean =
+        hrDao.countAtTimestamp(tsSeconds) > 0
+
+    suspend fun hasEventAtTimestamp(
+        tsSeconds: Long,
+        eventType: String,
+    ): Boolean =
+        eventDao.countAtTimestamp(tsSeconds, eventType) > 0
+
     suspend fun getEventsByTypeSince(
         fromSeconds: Long,
         eventType: String,

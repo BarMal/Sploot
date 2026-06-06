@@ -43,6 +43,10 @@ data class DebugUiState(
     val packetCount:     Int     = 0,
     val outgoingPacketCount: Int = 0,
     val incomingPacketCount: Int = 0,
+    val realtimeFrameCount: Int = 0,
+    val historicalFrameCount: Int = 0,
+    val historicalBatchMarkers: Int = 0,
+    val historicalCompleteMarkers: Int = 0,
     val traceEvents: List<WhoopBleTraceEvent> = emptyList(),
     val unknownAuditRows: List<UnknownAuditRow> = emptyList(),
 )
@@ -82,12 +86,16 @@ class DebugViewModel @Inject constructor(
                             hrBpm = 0,
                             ppgChannelA = emptyList(),
                             hapticsActive = false,
-                            packetCount = 0,
-                            outgoingPacketCount = 0,
-                            incomingPacketCount = 0,
-                            traceEvents = emptyList(),
-                            unknownAuditRows = emptyList(),
-                        )
+                        packetCount = 0,
+                        outgoingPacketCount = 0,
+                        incomingPacketCount = 0,
+                        realtimeFrameCount = 0,
+                        historicalFrameCount = 0,
+                        historicalBatchMarkers = 0,
+                        historicalCompleteMarkers = 0,
+                        traceEvents = emptyList(),
+                        unknownAuditRows = emptyList(),
+                    )
                     }
                 }
             }
@@ -110,6 +118,10 @@ class DebugViewModel @Inject constructor(
                     state.copy(
                         outgoingPacketCount = state.outgoingPacketCount + if (trace.direction == TraceDirection.OUTGOING) 1 else 0,
                         incomingPacketCount = state.incomingPacketCount + if (trace.direction == TraceDirection.INCOMING) 1 else 0,
+                        realtimeFrameCount = state.realtimeFrameCount + if (trace.summary.contains("raw-realtime")) 1 else 0,
+                        historicalFrameCount = state.historicalFrameCount + if (trace.summary.contains("historical-data")) 1 else 0,
+                        historicalBatchMarkers = state.historicalBatchMarkers + if (trace.summary.contains("Historical batch marker")) 1 else 0,
+                        historicalCompleteMarkers = state.historicalCompleteMarkers + if (trace.summary.contains("Historical sync complete")) 1 else 0,
                         traceEvents = (listOf(trace) + state.traceEvents).take(80),
                     )
                 }
@@ -202,6 +214,16 @@ class DebugViewModel @Inject constructor(
 
     fun stopRecording() {
         context.startService(WhoopRecordingService.stopIntent(context))
+    }
+
+    fun startHistoricalBackfill() {
+        val settings = settingsRepository.current()
+        if (settings.preferredWhoopDeviceAddress == null) {
+            _uiState.update { it.copy(latestBandEvent = "Pick a WHOOP device before backfill") }
+            return
+        }
+        context.startForegroundService(WhoopRecordingService.startHistoricalSyncIntent(context))
+        _uiState.update { it.copy(latestBandEvent = "Requested historical backfill") }
     }
 
     fun onScreenVisible() {

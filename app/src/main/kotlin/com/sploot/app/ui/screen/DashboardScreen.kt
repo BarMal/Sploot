@@ -921,21 +921,39 @@ private fun TodaySignalsSection(
         )
         TrendCard(
             title = "Heart Rate Today",
-            subtitle = "15-minute average heart rate",
+            subtitle = "5-minute average heart rate",
             accent = Color(0xFFF86D74),
             points = state.todayHeartRateTrend,
+            yAxis = TrendYAxis(
+                min = 40f,
+                max = 200f,
+                ticks = listOf(200f, 160f, 120f, 80f, 40f),
+                suffix = "",
+            ),
         )
         TrendCard(
             title = "Breaths Per Minute Today",
             subtitle = "Derived respiratory rate where available",
             accent = Color(0xFF7AC7FF),
             points = state.todayRespRateTrend,
+            yAxis = TrendYAxis(
+                min = 8f,
+                max = 30f,
+                ticks = listOf(30f, 24f, 18f, 12f, 8f),
+                suffix = "",
+            ),
         )
         TrendCard(
             title = "Skin Temperature Today",
             subtitle = "Average of recorded temperature events",
             accent = Color(0xFFFFA24C),
             points = state.todayTempTrend,
+            yAxis = TrendYAxis(
+                min = 25f,
+                max = 40f,
+                ticks = listOf(40f, 35f, 30f, 25f),
+                suffix = "C",
+            ),
         )
     }
 }
@@ -1064,6 +1082,7 @@ private fun TrendCard(
     subtitle: String,
     accent: Color,
     points: List<DashboardTrendPoint>,
+    yAxis: TrendYAxis? = null,
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -1083,6 +1102,7 @@ private fun TrendCard(
             LineTrendChart(
                 points = points,
                 accent = accent,
+                yAxis = yAxis,
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(180.dp),
@@ -1498,56 +1518,99 @@ private fun CircularGauge(
 private fun LineTrendChart(
     points: List<DashboardTrendPoint>,
     accent: Color,
+    yAxis: TrendYAxis? = null,
     modifier: Modifier = Modifier,
 ) {
     val validPoints = points.mapIndexedNotNull { index, point ->
         point.value?.let { index to it }
     }
+    val axisConfig = remember(points, yAxis) {
+        yAxis ?: validPoints
+            .takeIf { it.isNotEmpty() }
+            ?.let { values ->
+                val min = values.minOf { it.second }
+                val max = values.maxOf { it.second }
+                val range = (max - min).takeIf { it > 0f } ?: 1f
+                TrendYAxis(
+                    min = min,
+                    max = max + if (max == min) range else 0f,
+                    ticks = listOf(max, min + range / 2f, min),
+                    suffix = "",
+                )
+            }
+    }
+    val axisLabelColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f)
+    val gridColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.10f)
 
     Column(modifier = modifier) {
-        Canvas(
+        Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f),
         ) {
-            val width = size.width
-            val height = size.height
-            val padding = 24.dp.toPx()
-            val usableWidth = (width - padding * 2).coerceAtLeast(1f)
-            val usableHeight = (height - padding * 2).coerceAtLeast(1f)
-
-            repeat(4) { line ->
-                val y = padding + usableHeight * (line / 3f)
-                drawLine(
-                    color = Color.White.copy(alpha = 0.08f),
-                    start = Offset(padding, y),
-                    end = Offset(width - padding, y),
-                    strokeWidth = 1.dp.toPx(),
-                )
+            if (axisConfig != null) {
+                Column(
+                    modifier = Modifier
+                        .width(42.dp)
+                        .fillMaxSize(),
+                    verticalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    axisConfig.ticks.forEach { tick ->
+                        Text(
+                            text = axisConfig.format(tick),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = axisLabelColor,
+                            textAlign = TextAlign.End,
+                            modifier = Modifier
+                                .fillMaxWidth(),
+                        )
+                    }
+                }
             }
 
-            if (validPoints.size >= 2) {
-                val min = validPoints.minOf { it.second }
-                val max = validPoints.maxOf { it.second }
-                val range = (max - min).takeIf { it > 0f } ?: 1f
+            Canvas(
+                modifier = Modifier
+                    .fillMaxSize(),
+            ) {
+                val width = size.width
+                val height = size.height
+                val padding = 18.dp.toPx()
+                val usableWidth = (width - padding * 2).coerceAtLeast(1f)
+                val usableHeight = (height - padding * 2).coerceAtLeast(1f)
+                val axisMin = axisConfig?.min ?: validPoints.minOfOrNull { it.second } ?: 0f
+                val axisMax = axisConfig?.max ?: validPoints.maxOfOrNull { it.second } ?: 1f
+                val range = (axisMax - axisMin).takeIf { it > 0f } ?: 1f
 
-                val path = Path()
-                validPoints.forEachIndexed { idx, (index, value) ->
-                    val x = padding + usableWidth * (index / (points.lastIndex.coerceAtLeast(1)).toFloat())
-                    val y = height - padding - ((value - min) / range) * usableHeight
-                    if (idx == 0) path.moveTo(x, y) else path.lineTo(x, y)
+                val tickValues = axisConfig?.ticks ?: listOf(axisMax, axisMin + range / 2f, axisMin)
+                tickValues.forEach { tick ->
+                    val y = height - padding - ((tick - axisMin) / range).coerceIn(0f, 1f) * usableHeight
+                    drawLine(
+                        color = gridColor,
+                        start = Offset(padding, y),
+                        end = Offset(width - padding, y),
+                        strokeWidth = 1.dp.toPx(),
+                    )
                 }
 
-                drawPath(
-                    path = path,
-                    color = accent,
-                    style = Stroke(width = 4.dp.toPx(), cap = StrokeCap.Round),
-                )
+                if (validPoints.size >= 2) {
+                    val path = Path()
+                    validPoints.forEachIndexed { idx, (index, value) ->
+                        val x = padding + usableWidth * (index / (points.lastIndex.coerceAtLeast(1)).toFloat())
+                        val y = height - padding - ((value - axisMin) / range).coerceIn(0f, 1f) * usableHeight
+                        if (idx == 0) path.moveTo(x, y) else path.lineTo(x, y)
+                    }
 
-                validPoints.forEach { (index, value) ->
-                    val x = padding + usableWidth * (index / (points.lastIndex.coerceAtLeast(1)).toFloat())
-                    val y = height - padding - ((value - min) / range) * usableHeight
-                    drawCircle(color = accent, radius = 4.dp.toPx(), center = Offset(x, y))
+                    drawPath(
+                        path = path,
+                        color = accent,
+                        style = Stroke(width = 4.dp.toPx(), cap = StrokeCap.Round),
+                    )
+
+                    validPoints.forEach { (index, value) ->
+                        val x = padding + usableWidth * (index / (points.lastIndex.coerceAtLeast(1)).toFloat())
+                        val y = height - padding - ((value - axisMin) / range).coerceIn(0f, 1f) * usableHeight
+                        drawCircle(color = accent, radius = 4.dp.toPx(), center = Offset(x, y))
+                    }
                 }
             }
         }
@@ -1566,6 +1629,20 @@ private fun LineTrendChart(
             }
         }
     }
+}
+
+private data class TrendYAxis(
+    val min: Float,
+    val max: Float,
+    val ticks: List<Float>,
+    val suffix: String,
+) {
+    fun format(value: Float): String =
+        if (suffix.isBlank()) {
+            value.toInt().toString()
+        } else {
+            "${value.toInt()}$suffix"
+        }
 }
 
 private fun visibleAxisLabels(points: List<DashboardTrendPoint>, maxLabels: Int = 6): List<DashboardTrendPoint> {

@@ -279,11 +279,20 @@ class DashboardViewModel @Inject constructor(
                 .atStartOfDay(zone)
                 .toEpochSecond()
 
-            val sessionsInRange = sleepRepo.getSessionsInRange(fromSeconds, nowSeconds)
+            val allSessionsInRange = sleepRepo.getSessionsInRange(fromSeconds, nowSeconds)
+            val sessionsInRange = allSessionsInRange
                 .filter { it.source == SleepSource.ALGO }
+                .filter { it.isPlausibleSleepSession() }
                 .sortedBy { it.startEpochSeconds }
-            val todaysSessions = sleepRepo.getSessionsInRange(startOfToday, nowSeconds)
+            val garminSessionsInRange = allSessionsInRange
+                .filter { it.source == SleepSource.GARMIN }
+                .filter { it.isPlausibleSleepSession() }
+                .sortedBy { it.startEpochSeconds }
+            val sleepDurationSessionsInRange = sessionsInRange.ifEmpty { garminSessionsInRange }
+            val allTodaysSessions = sleepRepo.getSessionsInRange(startOfToday, nowSeconds)
+            val todaysSessions = allTodaysSessions
                 .filter { it.source == SleepSource.ALGO }
+                .filter { it.isPlausibleSleepSession() }
                 .sortedBy { it.startEpochSeconds }
             val latestAlgoSleep = sessionsInRange.lastOrNull()
             val todaySleep = todaysSessions.lastOrNull()
@@ -301,10 +310,10 @@ class DashboardViewModel @Inject constructor(
             }
 
             val averageSleepScore = sessionsInRange.mapNotNull { it.totalScore }.averageNumberOrNull()
-            val averageSleepHours = sessionsInRange
+            val averageSleepHours = sleepDurationSessionsInRange
                 .map { (it.endEpochSeconds - it.startEpochSeconds).coerceAtLeast(0L) / 3600f }
                 .averageNumberOrNull()
-            val averageSleepEfficiency = sessionsInRange.mapNotNull { it.efficiencyPercent }.averageNumberOrNull()
+            val averageSleepEfficiency = sleepDurationSessionsInRange.mapNotNull { it.efficiencyPercent }.averageNumberOrNull()
 
             val hrvWindows = sleepRepo.getHrvWindowsSince(fromSeconds)
             val activities = activityRepo.getActivitiesInRange(fromSeconds, nowSeconds)
@@ -507,14 +516,14 @@ class DashboardViewModel @Inject constructor(
     private fun buildIntradayTrend(
         startOfToday: Long,
         nowSeconds: Long,
-        bucketSeconds: Long = 15 * 60L,
+        bucketSeconds: Long = 5 * 60L,
         valueForBucket: (Long, Long) -> Float?,
     ): List<DashboardTrendPoint> {
         val bucketCount = ((24 * 3600L) / bucketSeconds).toInt()
         return (0 until bucketCount).map { index ->
             val bucketStart = startOfToday + index * bucketSeconds
             val bucketEnd = bucketStart + bucketSeconds
-            val label = if (index % 8 == 0) {
+            val label = if (index % 12 == 0) {
                 Instant.ofEpochSecond(bucketStart)
                     .atZone(ZoneId.systemDefault())
                     .toLocalTime()
@@ -529,6 +538,14 @@ class DashboardViewModel @Inject constructor(
         }
     }
 }
+
+private fun com.sploot.domain.model.SleepSession.isPlausibleSleepSession(): Boolean {
+    val durationHours = (endEpochSeconds - startEpochSeconds).coerceAtLeast(0L) / 3600f
+    return durationHours in MIN_PLAUSIBLE_SLEEP_HOURS..MAX_PLAUSIBLE_SLEEP_HOURS
+}
+
+private const val MIN_PLAUSIBLE_SLEEP_HOURS = 2f
+private const val MAX_PLAUSIBLE_SLEEP_HOURS = 14f
 
 private fun estimateRedIrRatio(
     red: IntArray,
