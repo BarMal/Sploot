@@ -451,15 +451,6 @@ class WhoopGattManager @Inject constructor(
             }
 
             record?.let { _records.tryEmit(it) }
-            if (
-                sessionMode == WhoopSessionMode.HISTORICAL_SYNC &&
-                !historicalSyncDeferred.isCompleted &&
-                (packetType == 0x28 || packetType == 0x2B)
-            ) {
-                traceInternal("metadata", "Historical sync implicitly complete after realtime frame")
-                historicalSyncDeferred.complete(Unit)
-                _state.value = ConnectionState.READY
-            }
             if (packetType == 0x30) {
                 if (record == null) {
                     val eventType = eventType(frame)

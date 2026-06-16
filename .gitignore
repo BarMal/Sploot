@@ -14,6 +14,3 @@ local.properties
 .claude/
 /data/schemas/
 references/
-
-# Gradle wrapper JAR (binary - generate with `gradle wrapper`)
-gradle/wrapper/gradle-wrapper.jar
