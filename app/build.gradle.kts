@@ -6,6 +6,24 @@ plugins {
     alias(libs.plugins.ksp)
 }
 
+fun resolvedVersionName(): String =
+    providers.environmentVariable("RELEASE_VERSION_NAME")
+        .orElse(providers.environmentVariable("GITHUB_REF_NAME").map { it.removePrefix("v") })
+        .orElse("0.1.0")
+        .get()
+
+fun resolvedVersionCode(): Int =
+    providers.environmentVariable("RELEASE_VERSION_CODE")
+        .map(String::toInt)
+        .orElse(
+            providers.environmentVariable("GITHUB_REF_NAME").map { tag ->
+                val parts = tag.removePrefix("v").split(".").mapNotNull(String::toIntOrNull)
+                if (parts.size == 3) parts[0] * 10_000 + parts[1] * 100 + parts[2] else 1
+            }
+        )
+        .orElse(1)
+        .get()
+
 android {
     namespace   = "com.sploot.app"
     compileSdk  = 36
@@ -14,8 +32,8 @@ android {
         applicationId          = "com.sploot.app"
         minSdk                 = 26
         targetSdk              = 35
-        versionCode            = 1
-        versionName            = "0.1.0"
+        versionCode            = resolvedVersionCode()
+        versionName            = resolvedVersionName()
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -38,8 +56,6 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            // Falls back to debug signing for local builds where the release
-            // keystore env vars aren't set, e.g. outside of the release CI job.
             signingConfig = signingConfigs.findByName("release")
                 ?: signingConfigs.getByName("debug")
         }
