@@ -26,6 +26,9 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            // No managed release keystore yet; sign with the debug key so
+            // release builds stay installable until a real signing config exists.
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
 
