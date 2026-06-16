@@ -43,6 +43,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -256,13 +257,17 @@ class WhoopRecordingService : Service() {
             pendingLiveRestartAfterStop = false
             startupMode = null
             val wasHistoricalSync = currentMode == WhoopSessionMode.HISTORICAL_SYNC
-            recordCollectorJob?.cancel()
-            recordCollectorJob = null
-            unknownCollectorJob?.cancel()
-            unknownCollectorJob = null
             runCatching { gattManager.disableActiveStreams() }
                 .onFailure { Timber.w(it, "Failed to disable WHOOP streams before disconnect") }
             gattManager.disconnect()
+            // Give the collectors a moment to drain any records already buffered
+            // from the GATT callback before we cancel them, so the last batch of
+            // historical/live data isn't dropped on the floor at shutdown.
+            delay(500L)
+            recordCollectorJob?.cancelAndJoin()
+            recordCollectorJob = null
+            unknownCollectorJob?.cancelAndJoin()
+            unknownCollectorJob = null
             if (currentSessionId >= 0) {
                 val sessionId = currentSessionId
                 recordingRepo.endSession(sessionId)
@@ -716,8 +721,8 @@ class WhoopRecordingService : Service() {
         val sessionId = currentSessionId
         if (sessionId < 0L) return
         runBlocking {
-            recordCollectorJob?.cancel()
-            unknownCollectorJob?.cancel()
+            recordCollectorJob?.cancelAndJoin()
+            unknownCollectorJob?.cancelAndJoin()
             runCatching { gattManager.disableActiveStreams() }
                 .onFailure { Timber.w(it, "Failed to disable WHOOP streams during $reason") }
             recordingRepo.endSession(sessionId)
