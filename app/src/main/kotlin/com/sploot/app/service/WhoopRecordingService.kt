@@ -724,7 +724,10 @@ class WhoopRecordingService : Service() {
         tsSeconds: Long,
         lastPersistedSecond: Long?,
         intervalSeconds: Int,
-    ): Boolean = lastPersistedSecond == null || (tsSeconds - lastPersistedSecond) >= intervalSeconds
+    ): Boolean =
+        currentMode == WhoopSessionMode.HISTORICAL_SYNC ||
+            lastPersistedSecond == null ||
+            (tsSeconds - lastPersistedSecond) >= intervalSeconds
 
     private suspend fun shouldSkipExistingHistoricalImu(tsSeconds: Long): Boolean =
         currentMode == WhoopSessionMode.HISTORICAL_SYNC &&
