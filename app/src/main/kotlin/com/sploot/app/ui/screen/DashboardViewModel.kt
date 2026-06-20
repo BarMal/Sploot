@@ -76,6 +76,7 @@ data class DashboardUiState(
     val totalActivityHours: Float = 0f,
     val totalCalories: Float = 0f,
     val sleepScoreTrend: List<DashboardTrendPoint> = emptyList(),
+    val heartRateTrend: List<DashboardTrendPoint> = emptyList(),
     val hrvTrend: List<DashboardTrendPoint> = emptyList(),
     val activityTrend: List<DashboardTrendPoint> = emptyList(),
     val isLoading: Boolean = true,
@@ -324,7 +325,8 @@ class DashboardViewModel @Inject constructor(
                 .sortedBy { it.startEpochSeconds }
             val todaysActivities = activityRepo.getActivitiesInRange(startOfToday, nowSeconds)
                 .sortedBy { it.startEpochSeconds }
-            val todaysHrSamples = recordingRepo.getHrSamplesSince(startOfToday)
+            val hrSamplesInRange = recordingRepo.getHrSamplesSince(fromSeconds)
+            val todaysHrSamples = hrSamplesInRange.filter { it.tsSeconds >= startOfToday }
             val todaysTempEvents = recordingRepo.getEventsByTypeSince(startOfToday, TEMP_EVENT_TYPE)
             val todaysRespEpochs = sleepRepo.getEpochsSince(startOfToday, SleepSource.ALGO)
 
@@ -383,6 +385,16 @@ class DashboardViewModel @Inject constructor(
                         sessionsInRange
                             .filter { it.startEpochSeconds in dayStart until dayEnd }
                             .mapNotNull { sleep -> sleep.totalScore?.toFloat() }
+                            .averageNumberOrNull()
+                    },
+                    heartRateTrend = buildDailyTrend(
+                        days = it.selectedRange.days,
+                        fromSeconds = fromSeconds,
+                        zone = zone,
+                    ) { dayStart, dayEnd ->
+                        hrSamplesInRange
+                            .filter { sample -> sample.tsSeconds in dayStart until dayEnd }
+                            .map { sample -> sample.hrBpm.toFloat() }
                             .averageNumberOrNull()
                     },
                     hrvTrend = buildDailyTrend(

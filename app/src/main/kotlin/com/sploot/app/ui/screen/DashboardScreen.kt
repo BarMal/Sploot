@@ -229,6 +229,21 @@ fun DashboardScreen(
 
                 item {
                     TrendCard(
+                        title = "Heart Rate Trend",
+                        subtitle = "Average WHOOP heart rate by day",
+                        accent = Color(0xFFF86D74),
+                        points = state.heartRateTrend,
+                        yAxis = TrendYAxis(
+                            min = 40f,
+                            max = 200f,
+                            ticks = listOf(200f, 160f, 120f, 80f, 40f),
+                            suffix = "",
+                        ),
+                    )
+                }
+
+                item {
+                    TrendCard(
                         title = "Sleep Score Trend",
                         subtitle = "Algorithm-derived sleep score by day",
                         accent = Color(0xFF57E6B1),
