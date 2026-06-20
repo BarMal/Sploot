@@ -114,6 +114,8 @@ class WhoopGattManager @Inject constructor(
     @Volatile private var batchCounter = 5
     @Volatile private var pendingLiveStreamConfig = WhoopStreamConfig()
     @Volatile private var realtimeEnableIssued = false
+    @Volatile private var historicalFramesSeen = 0
+    @Volatile private var historicalRecordsDecoded = 0
     private val observedSecondaryRecordTypes = mutableSetOf<Int>()
     private var loggedR11FallbackIgnore = false
     private var loggedObservedR11Companion = false
@@ -138,14 +140,25 @@ class WhoopGattManager @Inject constructor(
                 BluetoothProfile.STATE_DISCONNECTED -> {
                     _state.value = ConnectionState.DISCONNECTED
                     val disconnectException = IOException("GATT disconnected during WHOOP operation (status=$status)")
-                    if (!connectionDeferred.isCompleted) {
-                        connectionDeferred.completeExceptionally(disconnectException)
-                    }
-                    if (!liveReadyDeferred.isCompleted) {
-                        liveReadyDeferred.completeExceptionally(disconnectException)
-                    }
-                    if (!historicalSyncDeferred.isCompleted) {
-                        historicalSyncDeferred.completeExceptionally(disconnectException)
+                    if (sessionMode == WhoopSessionMode.HISTORICAL_SYNC &&
+                        historicalFramesSeen > 0 &&
+                        !historicalSyncDeferred.isCompleted
+                    ) {
+                        traceInternal(
+                            channel = "metadata",
+                            summary = "Historical sync ended by strap disconnect after $historicalFramesSeen frames, decoded=$historicalRecordsDecoded",
+                        )
+                        historicalSyncDeferred.complete(Unit)
+                    } else {
+                        if (!connectionDeferred.isCompleted) {
+                            connectionDeferred.completeExceptionally(disconnectException)
+                        }
+                        if (!liveReadyDeferred.isCompleted) {
+                            liveReadyDeferred.completeExceptionally(disconnectException)
+                        }
+                        if (!historicalSyncDeferred.isCompleted) {
+                            historicalSyncDeferred.completeExceptionally(disconnectException)
+                        }
                     }
                     dataAssembler.reset()
                     eventAssembler.reset()
@@ -238,6 +251,8 @@ class WhoopGattManager @Inject constructor(
         this.sessionMode = sessionMode
         pendingLiveStreamConfig = streamConfig
         realtimeEnableIssued = false
+        historicalFramesSeen = 0
+        historicalRecordsDecoded = 0
         recentProtocolContext.clear()
 
         connectionDeferred = CompletableDeferred()
@@ -310,6 +325,8 @@ class WhoopGattManager @Inject constructor(
         sessionMode = WhoopSessionMode.LIVE_RECORDING
         pendingLiveStreamConfig = WhoopStreamConfig()
         realtimeEnableIssued = false
+        historicalFramesSeen = 0
+        historicalRecordsDecoded = 0
         observedSecondaryRecordTypes.clear()
         loggedR11FallbackIgnore = false
         loggedObservedR11Companion = false
@@ -419,6 +436,9 @@ class WhoopGattManager @Inject constructor(
             if (handleMetadataFrame(frame)) {
                 continue
             }
+            if (sessionMode == WhoopSessionMode.HISTORICAL_SYNC && packetType == 0x2F) {
+                historicalFramesSeen++
+            }
 
             if (packetType == 0x24) {
                 traceCommandResponse(frame)
@@ -460,7 +480,21 @@ class WhoopGattManager @Inject constructor(
                 else -> null
             }
 
-            record?.let { _records.tryEmit(it) }
+            record?.let {
+                if (sessionMode == WhoopSessionMode.HISTORICAL_SYNC && packetType == 0x2F) {
+                    historicalRecordsDecoded++
+                }
+                _records.tryEmit(it)
+            }
+            if (
+                sessionMode == WhoopSessionMode.HISTORICAL_SYNC &&
+                !historicalSyncDeferred.isCompleted &&
+                (packetType == 0x28 || packetType == 0x2B)
+            ) {
+                traceInternal("metadata", "Historical sync implicitly complete after realtime frame")
+                historicalSyncDeferred.complete(Unit)
+                _state.value = ConnectionState.READY
+            }
             if (packetType == 0x30) {
                 if (record == null) {
                     val eventType = eventType(frame)

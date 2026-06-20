@@ -201,6 +201,7 @@ class WhoopRecordingService : Service() {
             } catch (e: Exception) {
                 startupMode = null
                 Timber.e(e, "Recording session failed")
+                cleanupFailedSession(reason = "recording failed", wasHistoricalSync = false)
                 whoopRuntimeCoordinator.setState(WhoopRuntimeState.ERROR)
                 stopSelf()
             }
@@ -247,7 +248,7 @@ class WhoopRecordingService : Service() {
             } catch (e: Exception) {
                 startupMode = null
                 Timber.e(e, "Historical sync failed")
-                whoopSyncCoordinator.markSyncFinished()
+                cleanupFailedSession(reason = "historical sync failed", wasHistoricalSync = true)
                 whoopRuntimeCoordinator.setState(WhoopRuntimeState.ERROR)
                 stopSelf()
             }
@@ -311,6 +312,45 @@ class WhoopRecordingService : Service() {
     }
 
     // ── BLE connection with exponential backoff ───────────────────────────────
+
+    private suspend fun cleanupFailedSession(
+        reason: String,
+        wasHistoricalSync: Boolean,
+    ) {
+        pendingHistoricalSyncAfterStop = false
+        pendingLiveRestartAfterStop = false
+        startupMode = null
+        recordCollectorJob?.cancel()
+        recordCollectorJob = null
+        unknownCollectorJob?.cancel()
+        unknownCollectorJob = null
+        runCatching { gattManager.disableActiveStreams() }
+            .onFailure { Timber.w(it, "Failed to disable WHOOP streams after $reason") }
+        gattManager.disconnect()
+
+        val sessionId = currentSessionId
+        if (sessionId >= 0L) {
+            recordingRepo.endSession(sessionId)
+            val hasAnyData = recordingRepo.sessionHasAnyData(sessionId)
+            if (!hasAnyData) {
+                recordingRepo.deleteSession(sessionId)
+                Timber.i("Dropped empty WHOOP session $sessionId after $reason")
+            } else {
+                Timber.i("Closed WHOOP session $sessionId after $reason")
+                enqueueProcessingWorkers(sessionId)
+            }
+            if (wasHistoricalSync) {
+                logHistoricalSummary(sessionId)
+            }
+        }
+
+        currentSessionId = -1L
+        syncCutoffSeconds = null
+        if (wasHistoricalSync) {
+            whoopSyncCoordinator.markSyncFinished()
+        }
+        stopForeground(STOP_FOREGROUND_REMOVE)
+    }
 
     private suspend fun connectWithRetry(
         mode: WhoopSessionMode,
