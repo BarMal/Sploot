@@ -27,6 +27,7 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -117,6 +118,9 @@ class WhoopGattManager @Inject constructor(
     @Volatile private var realtimeEnableIssued = false
     @Volatile private var historicalFramesSeen = 0
     @Volatile private var historicalRecordsDecoded = 0
+    @Volatile private var historicalSyncRunId = 0L
+    @Volatile private var historicalIdleFrameCount = 0
+    private var historicalIdleCompletionJob: Job? = null
     private val observedSecondaryRecordTypes = mutableSetOf<Int>()
     private var loggedR11FallbackIgnore = false
     private var loggedObservedR11Companion = false
@@ -149,7 +153,7 @@ class WhoopGattManager @Inject constructor(
                             channel = "metadata",
                             summary = "Historical sync ended by strap disconnect after $historicalFramesSeen frames, decoded=$historicalRecordsDecoded",
                         )
-                        historicalSyncDeferred.complete(Unit)
+                        completeHistoricalSync("strap disconnect", markReady = false)
                     } else {
                         if (!connectionDeferred.isCompleted) {
                             connectionDeferred.completeExceptionally(disconnectException)
@@ -254,6 +258,10 @@ class WhoopGattManager @Inject constructor(
         realtimeEnableIssued = false
         historicalFramesSeen = 0
         historicalRecordsDecoded = 0
+        historicalSyncRunId++
+        historicalIdleFrameCount = 0
+        historicalIdleCompletionJob?.cancel()
+        historicalIdleCompletionJob = null
         recentProtocolContext.clear()
 
         connectionDeferred = CompletableDeferred()
@@ -321,6 +329,10 @@ class WhoopGattManager @Inject constructor(
         realtimeEnableIssued = false
         historicalFramesSeen = 0
         historicalRecordsDecoded = 0
+        historicalSyncRunId++
+        historicalIdleFrameCount = 0
+        historicalIdleCompletionJob?.cancel()
+        historicalIdleCompletionJob = null
         observedSecondaryRecordTypes.clear()
         loggedR11FallbackIgnore = false
         loggedObservedR11Companion = false
@@ -397,7 +409,7 @@ class WhoopGattManager @Inject constructor(
         writeGatt(cmdChar, buildCommandPacket(nextSeq(), WhoopConstants.CMD_STOP_HAPTICS, byteArrayOf()))
     }
 
-    suspend fun awaitHistoricalSyncCompletion(timeoutMs: Long = 180_000L) {
+    suspend fun awaitHistoricalSyncCompletion(timeoutMs: Long = HISTORICAL_SYNC_TIMEOUT_MS) {
         withTimeout(timeoutMs) {
             historicalSyncDeferred.await()
         }
@@ -432,6 +444,7 @@ class WhoopGattManager @Inject constructor(
             }
             if (sessionMode == WhoopSessionMode.HISTORICAL_SYNC && packetType == 0x2F) {
                 historicalFramesSeen++
+                scheduleHistoricalIdleCompletion()
             }
 
             if (packetType == 0x24) {
@@ -486,8 +499,7 @@ class WhoopGattManager @Inject constructor(
                 (packetType == 0x28 || packetType == 0x2B)
             ) {
                 traceInternal("metadata", "Historical sync implicitly complete after realtime frame")
-                historicalSyncDeferred.complete(Unit)
-                _state.value = ConnectionState.READY
+                completeHistoricalSync("realtime frame")
             }
             if (packetType == 0x30) {
                 if (record == null) {
@@ -557,9 +569,7 @@ class WhoopGattManager @Inject constructor(
         if (frame[4] == 0x31.toByte()) {
             if (sessionMode == WhoopSessionMode.HISTORICAL_SYNC && !historicalSyncDeferred.isCompleted) {
                 traceInternal("metadata", "Historical sync complete marker received")
-                appendProtocolContext("metadata:historical-complete size=${frame.size}")
-                historicalSyncDeferred.complete(Unit)
-                _state.value = ConnectionState.READY
+                completeHistoricalSync("metadata complete marker size=${frame.size}")
                 Timber.i("Whoop historical sync complete")
             } else if (sessionMode == WhoopSessionMode.LIVE_RECORDING && !realtimeEnableIssued) {
                 traceInternal("metadata", "Live end-of-sync marker received, enabling realtime streams")
@@ -599,6 +609,42 @@ class WhoopGattManager @Inject constructor(
             }.onFailure {
                 Timber.w(it, "Failed to ACK historical batch marker")
             }
+        }
+    }
+
+    private fun scheduleHistoricalIdleCompletion() {
+        val runId = historicalSyncRunId
+        val frameCount = historicalFramesSeen
+        historicalIdleFrameCount = frameCount
+        historicalIdleCompletionJob?.cancel()
+        historicalIdleCompletionJob = managerScope.launch {
+            delay(HISTORICAL_IDLE_COMPLETION_MS)
+            if (
+                sessionMode == WhoopSessionMode.HISTORICAL_SYNC &&
+                historicalSyncRunId == runId &&
+                !historicalSyncDeferred.isCompleted &&
+                historicalFramesSeen > 0 &&
+                historicalFramesSeen == frameCount &&
+                historicalIdleFrameCount == frameCount
+            ) {
+                traceInternal(
+                    channel = "metadata",
+                    summary = "Historical sync complete after idle (${HISTORICAL_IDLE_COMPLETION_MS}ms, frames=$frameCount, decoded=$historicalRecordsDecoded)",
+                )
+                completeHistoricalSync("historical data idle")
+            }
+        }
+    }
+
+    private fun completeHistoricalSync(reason: String, markReady: Boolean = true) {
+        historicalIdleCompletionJob?.cancel()
+        historicalIdleCompletionJob = null
+        appendProtocolContext("metadata:historical-complete reason=$reason frames=$historicalFramesSeen decoded=$historicalRecordsDecoded")
+        if (!historicalSyncDeferred.isCompleted) {
+            historicalSyncDeferred.complete(Unit)
+        }
+        if (markReady) {
+            _state.value = ConnectionState.READY
         }
     }
 
@@ -1102,6 +1148,8 @@ class WhoopGattManager @Inject constructor(
 
     companion object {
         private const val DEFAULT_HARVARD_HAPTIC_PATTERN_ID = 2
+        private const val HISTORICAL_IDLE_COMPLETION_MS = 12_000L
+        private const val HISTORICAL_SYNC_TIMEOUT_MS = 30 * 60_000L
         private const val RECENT_PROTOCOL_CONTEXT_LIMIT = 8
         private const val MAX_PROTOCOL_CONTEXT_ENTRY_CHARS = 180
     }
