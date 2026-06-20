@@ -233,9 +233,14 @@ class WhoopRecordingService : Service() {
                 recordCollectorJob = launch { collectRecords() }
                 unknownCollectorJob?.cancel()
                 unknownCollectorJob = launch { collectUnknownObservations() }
-                connectWithRetry(currentMode)
-                whoopRuntimeCoordinator.setState(WhoopRuntimeState.HISTORY)
-                gattManager.awaitHistoricalSyncCompletion()
+                connectWithRetry(currentMode) {
+                    whoopRuntimeCoordinator.setState(WhoopRuntimeState.HISTORY)
+                    gattManager.awaitHistoricalSyncCompletion()
+                }
+                val repairedHrSamples = recordingRepo.repairMissingHrSamplesFromRawImu()
+                if (repairedHrSamples > 0) {
+                    Timber.i("Repaired $repairedHrSamples missing WHOOP HR samples from raw IMU")
+                }
                 delay(1_000L)
                 stopRecording()
             } catch (e: Exception) {
@@ -302,7 +307,10 @@ class WhoopRecordingService : Service() {
 
     // ── BLE connection with exponential backoff ───────────────────────────────
 
-    private suspend fun connectWithRetry(mode: WhoopSessionMode) {
+    private suspend fun connectWithRetry(
+        mode: WhoopSessionMode,
+        afterConnected: suspend () -> Unit = {},
+    ) {
         var backoffMs = 2_000L
 
         repeat(6) { attempt ->
@@ -322,9 +330,11 @@ class WhoopRecordingService : Service() {
                         "WHOOP connected — recording"
                     }
                 )
+                afterConnected()
                 return
             } catch (e: Exception) {
                 Timber.w(e, "Connect attempt $attempt failed, retry in ${backoffMs}ms")
+                gattManager.disconnect()
                 if (attempt < 5) {
                     delay(backoffMs)
                     backoffMs = (backoffMs * 2).coerceAtMost(30_000L)

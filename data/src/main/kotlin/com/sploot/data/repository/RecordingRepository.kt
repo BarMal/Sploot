@@ -186,6 +186,14 @@ class RecordingRepository @Inject constructor(
             eventDao.getLatestTimestamp(),
         ).maxOrNull()
 
+    suspend fun repairMissingHrSamplesFromRawImu(): Int {
+        val missingCount = imuDao.countMissingHrSamples()
+        if (missingCount > 0) {
+            imuDao.backfillMissingHrSamples()
+        }
+        return missingCount
+    }
+
     suspend fun sessionHasAnyData(sessionId: Long): Boolean =
         imuDao.countForSession(sessionId) > 0 ||
             ppgDao.countForSession(sessionId) > 0 ||

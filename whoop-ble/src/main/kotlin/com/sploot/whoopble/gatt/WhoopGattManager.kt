@@ -137,6 +137,16 @@ class WhoopGattManager @Inject constructor(
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
                     _state.value = ConnectionState.DISCONNECTED
+                    val disconnectException = IOException("GATT disconnected during WHOOP operation (status=$status)")
+                    if (!connectionDeferred.isCompleted) {
+                        connectionDeferred.completeExceptionally(disconnectException)
+                    }
+                    if (!liveReadyDeferred.isCompleted) {
+                        liveReadyDeferred.completeExceptionally(disconnectException)
+                    }
+                    if (!historicalSyncDeferred.isCompleted) {
+                        historicalSyncDeferred.completeExceptionally(disconnectException)
+                    }
                     dataAssembler.reset()
                     eventAssembler.reset()
                     cmdAssembler.reset()
