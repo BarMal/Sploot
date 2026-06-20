@@ -26,4 +26,29 @@ interface RawImuDao {
 
     @Query("SELECT MAX(tsSeconds) FROM raw_imu")
     suspend fun getLatestTimestamp(): Long?
+
+    @Query(
+        """
+        INSERT OR IGNORE INTO hr_samples(sessionId, tsSeconds, hrBpm)
+        SELECT sessionId, tsSeconds, hrBpm
+        FROM raw_imu
+        WHERE hrBpm BETWEEN 30 AND 240
+        """
+    )
+    suspend fun backfillMissingHrSamples()
+
+    @Query(
+        """
+        SELECT COUNT(*)
+        FROM raw_imu
+        WHERE hrBpm BETWEEN 30 AND 240
+            AND NOT EXISTS (
+                SELECT 1
+                FROM hr_samples
+                WHERE hr_samples.sessionId = raw_imu.sessionId
+                    AND hr_samples.tsSeconds = raw_imu.tsSeconds
+            )
+        """
+    )
+    suspend fun countMissingHrSamples(): Int
 }

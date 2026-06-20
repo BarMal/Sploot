@@ -258,11 +258,15 @@ class DashboardViewModel @Inject constructor(
 
     private fun refreshWhoopHistoryState() {
         viewModelScope.launch {
+            val repairedHrSamples = recordingRepo.repairMissingHrSamplesFromRawImu()
             val latestWhoopTimestamp = recordingRepo.getLatestStoredTimestamp()
             _uiState.update {
                 it.copy(
                     latestWhoopDataTimestampSeconds = latestWhoopTimestamp,
                 )
+            }
+            if (repairedHrSamples > 0) {
+                refreshAnalytics()
             }
         }
     }
