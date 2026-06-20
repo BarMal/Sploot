@@ -22,6 +22,7 @@ import com.sploot.whoopble.protocol.R12Decoder
 import com.sploot.whoopble.protocol.R21Decoder
 import com.sploot.whoopble.protocol.RealtimeHrSummaryDecoder
 import com.sploot.whoopble.protocol.WhoopConstants
+import com.sploot.whoopble.protocol.WhoopHistoricalProtocol
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -287,20 +288,13 @@ class WhoopGattManager @Inject constructor(
         val cmdChar = gatt!!.findCharacteristic(WhoopConstants.CMD_TO_STRAP_PREFIX)
             ?: throw IOException("CMD_TO_STRAP characteristic not found")
 
-        val initPackets = WhoopConstants.INIT_PACKETS
-        val historyRequestPacket = initPackets.last()
-
-        // Keep SET_CLOCK out of the realtime-enable sequence. The strap may emit
-        // the live sync boundary immediately after SEND_HISTORICAL_DATA, which can
-        // otherwise race and interleave SET_CLOCK between R10/R11 and R21 enables.
-        for (packet in initPackets.dropLast(1)) {
+        // Whoopsie documents this Gen4 startup as a strict five-packet sequence.
+        // Do not interleave SET_CLOCK before SEND_HISTORICAL_DATA; some straps stop
+        // the historical transfer after the unexpected command.
+        for (packet in WhoopConstants.INIT_PACKETS) {
             writeGatt(cmdChar, packet)
             delay(50L)
         }
-
-        syncClock(cmdChar)
-
-        writeGatt(cmdChar, historyRequestPacket)
 
         if (sessionMode == WhoopSessionMode.LIVE_RECORDING) {
             _state.value = ConnectionState.CONNECTED
@@ -550,7 +544,7 @@ class WhoopGattManager @Inject constructor(
             frame[3] == 0xAB.toByte() &&
             frame[4] == 0x31.toByte()
         ) {
-            val batchNumber = frame.copyOfRange(17, 21)
+            val batchNumber = frame.copyOfRange(17, 25)
             traceInternal(
                 "metadata",
                 "Historical batch marker received batch=${frame.getUInt32LE(17)}",
@@ -601,7 +595,7 @@ class WhoopGattManager @Inject constructor(
                 val localGatt = gatt ?: return@launch
                 val cmdChar = localGatt.findCharacteristic(WhoopConstants.CMD_TO_STRAP_PREFIX)
                     ?: return@launch
-                writeGatt(cmdChar, buildBatchAckPacket(batchCounter++, batchNumber))
+                writeGatt(cmdChar, WhoopHistoricalProtocol.buildBatchAckPacket(batchCounter++, batchNumber))
             }.onFailure {
                 Timber.w(it, "Failed to ACK historical batch marker")
             }
@@ -1068,30 +1062,6 @@ class WhoopGattManager @Inject constructor(
     }
 
     private fun Int.toHexByte(): String = "%02x".format(this and 0xFF)
-
-    private fun buildBatchAckPacket(counter: Int, batchNumber: ByteArray): ByteArray {
-        val inner = byteArrayOf(
-            WhoopConstants.CMD_TYPE_COMMAND.toByte(),
-            counter.toByte(),
-            0x17,
-            0x01,
-        ) + batchNumber.copyOf(4) + byteArrayOf(0x00, 0x00, 0x00, 0x00)
-
-        val frameLength = inner.size + 4
-        val lenLo  = (frameLength and 0xFF).toByte()
-        val lenHi  = ((frameLength shr 8) and 0xFF).toByte()
-        val hdrCrc = CrcValidator.crc8(byteArrayOf(lenLo, lenHi))
-        val crc32  = CrcValidator.crc32(inner)
-
-        return byteArrayOf(WhoopConstants.SOF, lenLo, lenHi, hdrCrc) +
-            inner +
-            byteArrayOf(
-                (crc32 and 0xFF).toByte(),
-                ((crc32 shr 8) and 0xFF).toByte(),
-                ((crc32 shr 16) and 0xFF).toByte(),
-                ((crc32 ushr 24) and 0xFF).toByte(),
-            )
-    }
 
     /**
      * Build a command frame ready to write to CMD_TO_STRAP.

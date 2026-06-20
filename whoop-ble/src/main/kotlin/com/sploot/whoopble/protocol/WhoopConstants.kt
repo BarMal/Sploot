@@ -107,6 +107,12 @@ object WhoopConstants {
     /** Return device info including battery, RTC, firmware, and wrist state. */
     const val CMD_GET_HELLO_HARVARD: Int = 0x23
 
+    /** Start historical data transfer. */
+    const val CMD_SEND_HISTORICAL_DATA: Int = 0x16
+
+    /** ACK a historical batch marker. */
+    const val CMD_HISTORICAL_DATA_RESULT: Int = 0x17
+
     /** Enables R10 (HR + IMU) streaming.  Payload: [0x01]. */
     const val CMD_ENABLE_IMU: Int = 0x3F
 
