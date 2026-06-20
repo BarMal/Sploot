@@ -247,9 +247,16 @@ class WhoopRecordingService : Service() {
                 stopRecording()
             } catch (e: Exception) {
                 startupMode = null
-                Timber.e(e, "Historical sync failed")
-                cleanupFailedSession(reason = "historical sync failed", wasHistoricalSync = true)
-                whoopRuntimeCoordinator.setState(WhoopRuntimeState.ERROR)
+                if (hasHistoricalProgress()) {
+                    Timber.w(e, "Historical sync ended after receiving data; treating as partial success")
+                    updateNotification("WHOOP history received - finishing sync")
+                    cleanupFailedSession(reason = "historical sync ended after receiving data", wasHistoricalSync = true)
+                    whoopRuntimeCoordinator.setState(WhoopRuntimeState.IDLE)
+                } else {
+                    Timber.e(e, "Historical sync failed")
+                    cleanupFailedSession(reason = "historical sync failed", wasHistoricalSync = true)
+                    whoopRuntimeCoordinator.setState(WhoopRuntimeState.ERROR)
+                }
                 stopSelf()
             }
         }
@@ -760,6 +767,13 @@ class WhoopRecordingService : Service() {
         historicalEventPersisted = 0
         historicalSkippedByCutoff = 0
     }
+
+    private fun hasHistoricalProgress(): Boolean =
+        historicalImuPersisted > 0 ||
+            historicalPpgPersisted > 0 ||
+            historicalHrPersisted > 0 ||
+            historicalEventPersisted > 0 ||
+            historicalSkippedByCutoff > 0
 
     private fun logHistoricalSummary(sessionId: Long) {
         Timber.i(
